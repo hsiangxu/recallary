@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -119,12 +120,14 @@ class MainWindow(QMainWindow):
         self.search_button.clicked.connect(self.run_search)
         self.search_box.returnPressed.connect(self.run_search)
         self.paper_list.itemSelectionChanged.connect(self.on_paper_selected)
+        self.pending_list.itemSelectionChanged.connect(self.on_pending_selected)
         self.result_list.itemSelectionChanged.connect(self.on_result_selected)
         self.save_tags_button.clicked.connect(self.save_tags)
         self.save_bibtex_button.clicked.connect(self.save_bibtex)
         self.remove_bibtex_button.clicked.connect(self.remove_bibtex)
         self.open_pdf_button.clicked.connect(self.open_pdf)
         self.reveal_pdf_button.clicked.connect(self.reveal_pdf)
+        self.delete_pdf_button.clicked.connect(self.delete_paper)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -132,6 +135,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Papers"))
         self.paper_list = QListWidget()
         layout.addWidget(self.paper_list, 3)
+        layout.addWidget(QLabel("Pending PDFs"))
+        self.pending_list = QListWidget()
+        layout.addWidget(self.pending_list, 2)
         layout.addWidget(QLabel("Tag filter"))
         self.tag_filter_list = QListWidget()
         self.tag_filter_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
@@ -192,8 +198,10 @@ class MainWindow(QMainWindow):
         pdf_buttons = QHBoxLayout()
         self.open_pdf_button = QPushButton("Open PDF")
         self.reveal_pdf_button = QPushButton("Reveal in Folder")
+        self.delete_pdf_button = QPushButton("Delete Paper")
         pdf_buttons.addWidget(self.open_pdf_button)
         pdf_buttons.addWidget(self.reveal_pdf_button)
+        pdf_buttons.addWidget(self.delete_pdf_button)
         layout.addLayout(pdf_buttons)
         return panel
 
@@ -229,6 +237,7 @@ class MainWindow(QMainWindow):
             self.rebuild_button,
             self.refresh_button,
             self.search_button,
+            self.delete_pdf_button,
         ):
             button.setEnabled(not busy)
         if message:
@@ -237,10 +246,12 @@ class MainWindow(QMainWindow):
     def refresh(self) -> None:
         database.initialize(self.settings.database_path)
         self.paper_list.clear()
+        self.pending_list.clear()
         self.tag_filter_list.clear()
         with database.connect(self.settings.database_path) as connection:
             papers = database.list_papers(connection)
             tags = database.list_tags(connection)
+            existing_by_path = database.fetch_papers_by_path(connection)
 
         for row in papers:
             status = str(row["status"])
@@ -249,6 +260,27 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(row["relative_path"]))
             self.paper_list.addItem(item)
 
+        snapshots = scan_library(self.settings)
+        pending_count = 0
+        for snapshot in snapshots:
+            row = existing_by_path.get(snapshot.relative_path)
+            reason = ""
+            if row is None:
+                reason = "not indexed"
+            elif (
+                int(row["file_size"]) != snapshot.size
+                or int(row["modified_ns"]) != snapshot.modified_ns
+            ):
+                reason = "changed"
+            elif str(row["status"]) != "ready" or bool(row["error_message"]):
+                reason = str(row["status"])
+            if not reason:
+                continue
+            pending_count += 1
+            item = QListWidgetItem(f"{reason}\n{snapshot.relative_path}")
+            item.setData(Qt.ItemDataRole.UserRole, snapshot.relative_path)
+            self.pending_list.addItem(item)
+
         for row in tags:
             item = QListWidgetItem(f"{row['name']} ({row['paper_count']})")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -256,10 +288,11 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(row["name"]))
             self.tag_filter_list.addItem(item)
 
-        pdf_count = len(scan_library(self.settings))
+        pdf_count = len(snapshots)
         model_status = "installed" if model_is_installed(self.settings.model_dir) else "missing"
         self.statusBar().showMessage(
-            f"{len(papers)} tracked records, {pdf_count} PDFs in library, model {model_status}."
+            f"{len(papers)} tracked records, {pdf_count} PDFs in library, "
+            f"{pending_count} pending, model {model_status}."
         )
 
     def run_setup(self) -> None:
@@ -359,6 +392,16 @@ class MainWindow(QMainWindow):
         selected = self.paper_list.selectedItems()
         if not selected:
             return
+        self.pending_list.clearSelection()
+        relative_path = selected[0].data(Qt.ItemDataRole.UserRole)
+        self.current_result = None
+        self.show_paper(str(relative_path))
+
+    def on_pending_selected(self) -> None:
+        selected = self.pending_list.selectedItems()
+        if not selected:
+            return
+        self.paper_list.clearSelection()
         relative_path = selected[0].data(Qt.ItemDataRole.UserRole)
         self.current_result = None
         self.show_paper(str(relative_path))
@@ -373,6 +416,16 @@ class MainWindow(QMainWindow):
         with database.connect(self.settings.database_path) as connection:
             row = database.fetch_paper_by_relative_path(connection, relative_path)
             if row is None:
+                self.title_label.setText(Path(relative_path).name)
+                self.path_label.setText(relative_path)
+                self.status_label.setText("not indexed yet")
+                self.tags_edit.clear()
+                self.bibtex_edit.clear()
+                self.bib_summary_label.setText("none")
+                self.evidence_box.setPlainText(
+                    "This PDF is in library/ but has not been indexed yet.\n\n"
+                    "Click Index Library to make it searchable and enable tags/BibTeX."
+                )
                 return
             tags = database.tags_for_paper(connection, int(row["id"]))
             bibtex_row = database.bibtex_for_paper(connection, int(row["id"]))
@@ -485,22 +538,27 @@ class MainWindow(QMainWindow):
         if not files:
             return
         added = 0
+        added_paths: list[str] = []
         errors: list[str] = []
         self.settings.library_dir.mkdir(parents=True, exist_ok=True)
         for file_name in files:
             source = Path(file_name)
             try:
-                if source.resolve().is_relative_to(self.settings.library_dir.resolve()):
-                    continue
                 destination = _unique_destination(
                     self.settings.library_dir, source.name
                 )
                 shutil.copy2(source, destination)
                 added += 1
+                added_paths.append(_relative_path(self.settings, destination))
             except Exception as error:
                 errors.append(f"{source}: {error}")
         self.refresh()
         message = f"Added {added} PDF(s) to library."
+        if added:
+            message += "\n\nNew PDFs are shown under Pending PDFs until you index them."
+            message += "\n\n" + "\n".join(added_paths[:20])
+            if len(added_paths) > 20:
+                message += f"\n... and {len(added_paths) - 20} more"
         if errors:
             message += "\n\n" + "\n".join(errors[:10])
         QMessageBox.information(self, "Add PDFs", message)
@@ -523,3 +581,65 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Reveal PDF", "Select an existing PDF first.")
             return
         _open_in_file_manager(path)
+
+    def delete_paper(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(self, "Delete Paper", "Select an indexed paper first.")
+            return
+
+        path = self._current_pdf_path()
+        message = (
+            "Delete this paper from Recallary?\n\n"
+            f"{self.current_relative_path}\n\n"
+            "The PDF will be moved to data/trash/ and its index, tags, and BibTeX "
+            "entry will be removed from the database."
+        )
+        if path and not path.exists():
+            message = (
+                "This PDF file is missing from library/. Remove its database record?\n\n"
+                f"{self.current_relative_path}"
+            )
+        answer = QMessageBox.question(
+            self,
+            "Delete Paper",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            paper_id: int | None = None
+            with database.connect(self.settings.database_path) as connection:
+                row = database.fetch_paper_by_relative_path(
+                    connection, self.current_relative_path
+                )
+                if row is not None:
+                    paper_id = int(row["id"])
+
+            if path and path.exists():
+                timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                trash_dir = self.settings.data_dir / "trash" / timestamp
+                trash_dir.mkdir(parents=True, exist_ok=True)
+                destination = _unique_destination(trash_dir, path.name)
+                shutil.move(os.fspath(path), os.fspath(destination))
+
+            if paper_id is not None:
+                with database.connect(self.settings.database_path) as connection:
+                    database.remove_papers(connection, [paper_id])
+
+            self.current_relative_path = None
+            self.current_result = None
+            self.title_label.clear()
+            self.path_label.clear()
+            self.status_label.clear()
+            self.bib_summary_label.clear()
+            self.tags_edit.clear()
+            self.bibtex_edit.clear()
+            self.evidence_box.clear()
+            self.result_list.clear()
+            self.refresh()
+            self.statusBar().showMessage("Paper moved to data/trash/ and removed from index.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not delete paper", str(error))

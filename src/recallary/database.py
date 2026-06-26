@@ -390,6 +390,12 @@ def remove_papers(
             "DELETE FROM papers WHERE id = ?",
             ((paper_id,) for paper_id in paper_ids),
         )
+        connection.execute(
+            """
+            DELETE FROM tags
+            WHERE id NOT IN (SELECT tag_id FROM paper_tags)
+            """
+        )
     return len(paper_ids)
 
 

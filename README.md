@@ -71,6 +71,7 @@ The GUI lets you:
 
 - run setup and download the local model
 - add PDFs into `library/`
+- see unindexed or changed PDFs under `Pending PDFs`
 - index or rebuild the library
 - search with vague natural-language descriptions
 - filter search by manual tags
@@ -78,6 +79,7 @@ The GUI lets you:
 - attach or remove BibTeX entries
 - open a PDF with the system PDF reader
 - reveal a PDF in the file manager
+- delete a paper by moving its PDF to `data/trash/` and removing its index
 
 ## First setup
 
@@ -100,9 +102,10 @@ network access. Setup does not index PDFs.
 
 1. Open Recallary with `recallary`.
 2. Add PDFs with `Add PDFs`, or manually copy PDFs under `library/`.
-3. Click `Index Library`.
-4. Select a paper and add tags or BibTeX if useful.
-5. Search with a description such as:
+3. Confirm newly added PDFs appear under `Pending PDFs`.
+4. Click `Index Library`.
+5. Select a paper and add tags or BibTeX if useful.
+6. Search with a description such as:
 
 ```text
 ankle exoskeleton using impedance control and metabolic cost
@@ -110,6 +113,11 @@ ankle exoskeleton using impedance control and metabolic cost
 
 Search results show likely papers, tags, BibTeX hints, page numbers, and
 evidence snippets.
+
+`Delete Paper` does not permanently erase the PDF immediately. It moves the
+file from `library/` into `data/trash/` and removes the paper's index, tags,
+and BibTeX entry from the database.
+
 
 ## CLI fallback
 
