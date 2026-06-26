@@ -62,6 +62,16 @@ class SearchEvidence:
 
 
 @dataclass(frozen=True)
+class BibTeXInfo:
+    citekey: str = ""
+    entry_type: str = ""
+    title: str = ""
+    authors: str = ""
+    year: str = ""
+    raw_bibtex: str = ""
+
+
+@dataclass(frozen=True)
 class SearchResult:
     paper_id: int
     title: str
@@ -69,3 +79,5 @@ class SearchResult:
     relative_path: str
     score: float
     evidence: list[SearchEvidence]
+    tags: tuple[str, ...] = ()
+    bibtex: BibTeXInfo | None = None

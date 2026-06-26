@@ -32,6 +32,12 @@ def download_model(settings: Settings) -> Path:
         repo_id=settings.model_id,
         local_dir=settings.model_dir,
         cache_dir=settings.cache_dir / "huggingface" / "hub",
+        ignore_patterns=[
+            ".eval_results/*",
+            "onnx/*",
+            "openvino/*",
+            "pytorch_model.bin",
+        ],
     )
     if not (settings.model_dir / "config.json").is_file():
         raise RuntimeError("Model download completed without a model config.")

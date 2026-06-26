@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import Qt, QThread, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QStatusBar,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from recallary import database
+from recallary.bibtex import parse_bibtex
+from recallary.config import DEFAULT_LIMIT, Settings
+from recallary.domain import BibTeXInfo, SearchResult
+from recallary.indexing.embedder import model_is_installed
+from recallary.indexing.indexer import scan_library
+from recallary.gui.workers import IndexWorker, SearchWorker, SetupWorker
+
+
+def _display_title(row: Any) -> str:
+    title = str(row["title"] or "").strip()
+    return title or str(row["relative_path"])
+
+
+def _relative_path(settings: Settings, path: Path) -> str:
+    return path.resolve().relative_to(settings.root).as_posix()
+
+
+def _unique_destination(directory: Path, filename: str) -> Path:
+    destination = directory / filename
+    if not destination.exists():
+        return destination
+    stem = destination.stem
+    suffix = destination.suffix
+    counter = 1
+    while True:
+        candidate = directory / f"{stem} ({counter}){suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _open_in_file_manager(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        subprocess.run(["explorer", f"/select,{path}"], check=False)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", "-R", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path.parent)], check=False)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, settings: Settings):
+        super().__init__()
+        self.settings = settings
+        self.settings.configure_local_storage()
+        database.initialize(self.settings.database_path)
+
+        self.current_relative_path: str | None = None
+        self.current_result: SearchResult | None = None
+        self._threads: list[QThread] = []
+
+        self.setWindowTitle("Recallary")
+        self.resize(1280, 820)
+        self.setStatusBar(QStatusBar())
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+
+        toolbar = QHBoxLayout()
+        self.setup_button = QPushButton("Setup / Check Model")
+        self.add_button = QPushButton("Add PDFs")
+        self.index_button = QPushButton("Index Library")
+        self.rebuild_button = QPushButton("Rebuild Index")
+        self.refresh_button = QPushButton("Refresh")
+        toolbar.addWidget(self.setup_button)
+        toolbar.addWidget(self.add_button)
+        toolbar.addWidget(self.index_button)
+        toolbar.addWidget(self.rebuild_button)
+        toolbar.addWidget(self.refresh_button)
+        toolbar.addStretch(1)
+        root_layout.addLayout(toolbar)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_left_panel())
+        splitter.addWidget(self._build_middle_panel())
+        splitter.addWidget(self._build_right_panel())
+        splitter.setSizes([260, 560, 460])
+        root_layout.addWidget(splitter, 1)
+        self.setCentralWidget(root)
+
+        self.setup_button.clicked.connect(self.run_setup)
+        self.add_button.clicked.connect(self.add_pdfs)
+        self.index_button.clicked.connect(lambda: self.run_index(rebuild=False))
+        self.rebuild_button.clicked.connect(lambda: self.run_index(rebuild=True))
+        self.refresh_button.clicked.connect(self.refresh)
+        self.search_button.clicked.connect(self.run_search)
+        self.search_box.returnPressed.connect(self.run_search)
+        self.paper_list.itemSelectionChanged.connect(self.on_paper_selected)
+        self.result_list.itemSelectionChanged.connect(self.on_result_selected)
+        self.save_tags_button.clicked.connect(self.save_tags)
+        self.save_bibtex_button.clicked.connect(self.save_bibtex)
+        self.remove_bibtex_button.clicked.connect(self.remove_bibtex)
+        self.open_pdf_button.clicked.connect(self.open_pdf)
+        self.reveal_pdf_button.clicked.connect(self.reveal_pdf)
+
+    def _build_left_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.addWidget(QLabel("Papers"))
+        self.paper_list = QListWidget()
+        layout.addWidget(self.paper_list, 3)
+        layout.addWidget(QLabel("Tag filter"))
+        self.tag_filter_list = QListWidget()
+        self.tag_filter_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(self.tag_filter_list, 2)
+        return panel
+
+    def _build_middle_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        search_row = QHBoxLayout()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Describe the paper you are trying to find...")
+        self.search_button = QPushButton("Search")
+        search_row.addWidget(self.search_box, 1)
+        search_row.addWidget(self.search_button)
+        layout.addLayout(search_row)
+        self.result_list = QListWidget()
+        layout.addWidget(self.result_list, 1)
+        self.evidence_box = QTextEdit()
+        self.evidence_box.setReadOnly(True)
+        self.evidence_box.setPlaceholderText("Evidence snippets from selected search result.")
+        layout.addWidget(self.evidence_box, 1)
+        return panel
+
+    def _build_right_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        form = QFormLayout()
+        self.title_label = QLabel("")
+        self.title_label.setWordWrap(True)
+        self.path_label = QLabel("")
+        self.path_label.setWordWrap(True)
+        self.status_label = QLabel("")
+        self.bib_summary_label = QLabel("")
+        self.bib_summary_label.setWordWrap(True)
+        form.addRow("Title", self.title_label)
+        form.addRow("Path", self.path_label)
+        form.addRow("Status", self.status_label)
+        form.addRow("BibTeX", self.bib_summary_label)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Tags (comma-separated)"))
+        self.tags_edit = QLineEdit()
+        self.save_tags_button = QPushButton("Save Tags")
+        layout.addWidget(self.tags_edit)
+        layout.addWidget(self.save_tags_button)
+
+        layout.addWidget(QLabel("BibTeX"))
+        self.bibtex_edit = QTextEdit()
+        layout.addWidget(self.bibtex_edit, 1)
+        bib_buttons = QHBoxLayout()
+        self.save_bibtex_button = QPushButton("Save BibTeX")
+        self.remove_bibtex_button = QPushButton("Remove BibTeX")
+        bib_buttons.addWidget(self.save_bibtex_button)
+        bib_buttons.addWidget(self.remove_bibtex_button)
+        layout.addLayout(bib_buttons)
+
+        pdf_buttons = QHBoxLayout()
+        self.open_pdf_button = QPushButton("Open PDF")
+        self.reveal_pdf_button = QPushButton("Reveal in Folder")
+        pdf_buttons.addWidget(self.open_pdf_button)
+        pdf_buttons.addWidget(self.reveal_pdf_button)
+        layout.addLayout(pdf_buttons)
+        return panel
+
+    def _checked_tags(self) -> tuple[str, ...]:
+        tags: list[str] = []
+        for index in range(self.tag_filter_list.count()):
+            item = self.tag_filter_list.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                tags.append(item.data(Qt.ItemDataRole.UserRole))
+        return tuple(tags)
+
+    def _start_worker(self, worker: Any) -> QThread:
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        self._threads.append(thread)
+
+        def cleanup() -> None:
+            if thread in self._threads:
+                self._threads.remove(thread)
+            worker.deleteLater()
+
+        thread.finished.connect(cleanup)
+        thread.start()
+        return thread
+
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        for button in (
+            self.setup_button,
+            self.add_button,
+            self.index_button,
+            self.rebuild_button,
+            self.refresh_button,
+            self.search_button,
+        ):
+            button.setEnabled(not busy)
+        if message:
+            self.statusBar().showMessage(message)
+
+    def refresh(self) -> None:
+        database.initialize(self.settings.database_path)
+        self.paper_list.clear()
+        self.tag_filter_list.clear()
+        with database.connect(self.settings.database_path) as connection:
+            papers = database.list_papers(connection)
+            tags = database.list_tags(connection)
+
+        for row in papers:
+            status = str(row["status"])
+            suffix = "" if status == "ready" else f" [{status}]"
+            item = QListWidgetItem(f"{_display_title(row)}{suffix}\n{row['relative_path']}")
+            item.setData(Qt.ItemDataRole.UserRole, str(row["relative_path"]))
+            self.paper_list.addItem(item)
+
+        for row in tags:
+            item = QListWidgetItem(f"{row['name']} ({row['paper_count']})")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, str(row["name"]))
+            self.tag_filter_list.addItem(item)
+
+        pdf_count = len(scan_library(self.settings))
+        model_status = "installed" if model_is_installed(self.settings.model_dir) else "missing"
+        self.statusBar().showMessage(
+            f"{len(papers)} tracked records, {pdf_count} PDFs in library, model {model_status}."
+        )
+
+    def run_setup(self) -> None:
+        self._set_busy(True, "Running setup...")
+        worker = SetupWorker(self.settings)
+        worker.message.connect(lambda message: self.statusBar().showMessage(message))
+        worker.finished.connect(self._setup_finished)
+        thread = self._start_worker(worker)
+        worker.finished.connect(thread.quit)
+
+    def _setup_finished(self, ok: bool, message: str) -> None:
+        self._set_busy(False)
+        self.refresh()
+        if ok:
+            QMessageBox.information(self, "Recallary setup", message)
+        else:
+            QMessageBox.critical(self, "Recallary setup failed", message)
+
+    def run_index(self, *, rebuild: bool) -> None:
+        label = "Rebuilding index..." if rebuild else "Indexing library..."
+        self._set_busy(True, label)
+        self.result_list.clear()
+        self.evidence_box.clear()
+        worker = IndexWorker(self.settings, rebuild=rebuild)
+        worker.progress.connect(
+            lambda current, total, path: self.statusBar().showMessage(
+                f"[{current}/{total}] {path}"
+            )
+        )
+        worker.finished.connect(self._index_finished)
+        thread = self._start_worker(worker)
+        worker.finished.connect(thread.quit)
+
+    def _index_finished(self, ok: bool, summary: Any, error: str) -> None:
+        self._set_busy(False)
+        self.refresh()
+        if not ok:
+            QMessageBox.critical(self, "Index failed", error)
+            return
+        message = (
+            f"Index complete: {summary.indexed} indexed, "
+            f"{summary.metadata_updated} metadata-only updates, "
+            f"{summary.unchanged} unchanged, {summary.removed} removed, "
+            f"{summary.failed} failed."
+        )
+        if summary.failures:
+            message += "\n\n" + "\n".join(
+                f"{path}: {failure}" for path, failure in summary.failures[:20]
+            )
+        QMessageBox.information(self, "Index complete", message)
+
+    def run_search(self) -> None:
+        query = self.search_box.text().strip()
+        if not query:
+            QMessageBox.warning(self, "Search", "Enter a search description first.")
+            return
+        self._set_busy(True, "Searching...")
+        self.result_list.clear()
+        self.evidence_box.clear()
+        worker = SearchWorker(
+            self.settings,
+            query,
+            limit=DEFAULT_LIMIT,
+            tag_names=self._checked_tags(),
+        )
+        worker.finished.connect(self._search_finished)
+        thread = self._start_worker(worker)
+        worker.finished.connect(thread.quit)
+
+    def _search_finished(self, ok: bool, results: object, error: str) -> None:
+        self._set_busy(False)
+        if not ok:
+            QMessageBox.critical(self, "Search failed", error)
+            return
+        self.result_list.clear()
+        for rank, result in enumerate(results, start=1):
+            assert isinstance(result, SearchResult)
+            tags = f" | tags: {', '.join(result.tags)}" if result.tags else ""
+            item = QListWidgetItem(
+                f"{rank}. {result.title}\n{result.relative_path}{tags}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            self.result_list.addItem(item)
+        self.statusBar().showMessage(f"{self.result_list.count()} search results.")
+
+    def on_result_selected(self) -> None:
+        selected = self.result_list.selectedItems()
+        if not selected:
+            return
+        result = selected[0].data(Qt.ItemDataRole.UserRole)
+        if not isinstance(result, SearchResult):
+            return
+        self.current_result = result
+        self.show_paper(result.relative_path, result=result)
+
+    def on_paper_selected(self) -> None:
+        selected = self.paper_list.selectedItems()
+        if not selected:
+            return
+        relative_path = selected[0].data(Qt.ItemDataRole.UserRole)
+        self.current_result = None
+        self.show_paper(str(relative_path))
+
+    def show_paper(
+        self,
+        relative_path: str,
+        *,
+        result: SearchResult | None = None,
+    ) -> None:
+        self.current_relative_path = relative_path
+        with database.connect(self.settings.database_path) as connection:
+            row = database.fetch_paper_by_relative_path(connection, relative_path)
+            if row is None:
+                return
+            tags = database.tags_for_paper(connection, int(row["id"]))
+            bibtex_row = database.bibtex_for_paper(connection, int(row["id"]))
+
+        self.title_label.setText(_display_title(row))
+        self.path_label.setText(relative_path)
+        self.status_label.setText(str(row["status"]))
+        self.tags_edit.setText(", ".join(tags))
+        if bibtex_row:
+            self.bibtex_edit.setPlainText(str(bibtex_row["raw_bibtex"]))
+            summary = " ".join(
+                part
+                for part in (
+                    str(bibtex_row["citekey"] or ""),
+                    str(bibtex_row["year"] or ""),
+                )
+                if part
+            )
+            self.bib_summary_label.setText(summary or "saved")
+        else:
+            self.bibtex_edit.clear()
+            self.bib_summary_label.setText("none")
+
+        if result:
+            lines: list[str] = []
+            for evidence in result.evidence:
+                lines.append(f"PDF page {evidence.page_number}")
+                lines.append(evidence.text)
+                lines.append("")
+            if result.bibtex and isinstance(result.bibtex, BibTeXInfo):
+                pass
+            self.evidence_box.setPlainText("\n".join(lines).strip())
+
+    def save_tags(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(self, "Tags", "Select an indexed paper first.")
+            return
+        desired = {
+            database.normalize_tag_name(tag)
+            for tag in self.tags_edit.text().split(",")
+            if database.normalize_tag_name(tag)
+        }
+        try:
+            with database.connect(self.settings.database_path) as connection:
+                row = database.fetch_paper_by_relative_path(
+                    connection, self.current_relative_path
+                )
+                if row is None:
+                    raise ValueError("The selected paper is not indexed.")
+                current = set(database.tags_for_paper(connection, int(row["id"])))
+                for tag in sorted(desired - current):
+                    database.add_tag_to_paper(connection, self.current_relative_path, tag)
+                for tag in sorted(current - desired):
+                    database.remove_tag_from_paper(
+                        connection, self.current_relative_path, tag
+                    )
+            self.refresh()
+            self.show_paper(self.current_relative_path)
+            self.statusBar().showMessage("Tags saved.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not save tags", str(error))
+
+    def save_bibtex(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(self, "BibTeX", "Select an indexed paper first.")
+            return
+        raw = self.bibtex_edit.toPlainText().strip()
+        if not raw:
+            QMessageBox.warning(self, "BibTeX", "BibTeX text is empty.")
+            return
+        parsed = parse_bibtex(raw)
+        try:
+            with database.connect(self.settings.database_path) as connection:
+                database.save_bibtex_for_paper(
+                    connection,
+                    self.current_relative_path,
+                    raw_bibtex=raw,
+                    citekey=parsed["citekey"],
+                    entry_type=parsed["entry_type"],
+                    title=parsed["title"],
+                    authors=parsed["authors"],
+                    year=parsed["year"],
+                )
+            self.show_paper(self.current_relative_path)
+            self.statusBar().showMessage("BibTeX saved.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not save BibTeX", str(error))
+
+    def remove_bibtex(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(self, "BibTeX", "Select an indexed paper first.")
+            return
+        try:
+            with database.connect(self.settings.database_path) as connection:
+                database.remove_bibtex_from_paper(
+                    connection, self.current_relative_path
+                )
+            self.show_paper(self.current_relative_path)
+            self.statusBar().showMessage("BibTeX removed.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not remove BibTeX", str(error))
+
+    def add_pdfs(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add PDFs to Recallary",
+            str(Path.home()),
+            "PDF files (*.pdf)",
+        )
+        if not files:
+            return
+        added = 0
+        errors: list[str] = []
+        self.settings.library_dir.mkdir(parents=True, exist_ok=True)
+        for file_name in files:
+            source = Path(file_name)
+            try:
+                if source.resolve().is_relative_to(self.settings.library_dir.resolve()):
+                    continue
+                destination = _unique_destination(
+                    self.settings.library_dir, source.name
+                )
+                shutil.copy2(source, destination)
+                added += 1
+            except Exception as error:
+                errors.append(f"{source}: {error}")
+        self.refresh()
+        message = f"Added {added} PDF(s) to library."
+        if errors:
+            message += "\n\n" + "\n".join(errors[:10])
+        QMessageBox.information(self, "Add PDFs", message)
+
+    def _current_pdf_path(self) -> Path | None:
+        if not self.current_relative_path:
+            return None
+        return self.settings.root / self.current_relative_path
+
+    def open_pdf(self) -> None:
+        path = self._current_pdf_path()
+        if not path or not path.is_file():
+            QMessageBox.warning(self, "Open PDF", "Select an existing PDF first.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.fspath(path)))
+
+    def reveal_pdf(self) -> None:
+        path = self._current_pdf_path()
+        if not path or not path.is_file():
+            QMessageBox.warning(self, "Reveal PDF", "Select an existing PDF first.")
+            return
+        _open_in_file_manager(path)

@@ -10,6 +10,8 @@ dependencies:
   - filelock>=3.16,<4
   - huggingface_hub>=0.27,<2
   - numpy>=2.1,<3
+  - pyside6>=6.8,<7
+  - bibtexparser>=1.4,<3
   - pymupdf>=1.25,<2
   - pytorch-cpu>=2.6,<3
   - sentence-transformers>=5.1,<6

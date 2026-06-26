@@ -9,7 +9,7 @@ import numpy as np
 
 from recallary import database
 from recallary.config import Settings
-from recallary.domain import SearchEvidence, SearchResult
+from recallary.domain import BibTeXInfo, SearchEvidence, SearchResult
 from recallary.indexing.embedder import Embedder
 
 
@@ -41,14 +41,41 @@ def _fts_query(query: str) -> str:
     return " OR ".join(quoted)
 
 
+def _tag_filter_sql(tag_names: tuple[str, ...], paper_alias: str = "p") -> tuple[str, tuple[object, ...]]:
+    clean_tags = tuple(
+        dict.fromkeys(
+            database.normalize_tag_name(tag)
+            for tag in tag_names
+            if database.normalize_tag_name(tag)
+        )
+    )
+    if not clean_tags:
+        return "", ()
+    placeholders = ",".join("?" for _ in clean_tags)
+    return (
+        f"""
+        AND {paper_alias}.id IN (
+            SELECT pt.paper_id
+            FROM paper_tags pt
+            JOIN tags t ON t.id = pt.tag_id
+            WHERE t.name IN ({placeholders})
+            GROUP BY pt.paper_id
+            HAVING COUNT(DISTINCT t.name) = ?
+        )
+        """,
+        (*clean_tags, len(clean_tags)),
+    )
+
+
 def _lexical_hits(
-    connection: sqlite3.Connection, query: str
+    connection: sqlite3.Connection, query: str, tag_names: tuple[str, ...] = ()
 ) -> list[_ChunkHit]:
     match = _fts_query(query)
     if not match:
         return []
+    tag_sql, tag_params = _tag_filter_sql(tag_names)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             c.id AS chunk_id,
             c.paper_id,
@@ -63,10 +90,11 @@ def _lexical_hits(
         JOIN chunks c ON c.id = chunks_fts.chunk_id
         JOIN papers p ON p.id = c.paper_id
         WHERE chunks_fts MATCH ? AND p.status = 'ready'
+        {tag_sql}
         ORDER BY lexical_score ASC
         LIMIT ?
         """,
-        (match, RETRIEVAL_LIMIT),
+        (match, *tag_params, RETRIEVAL_LIMIT),
     ).fetchall()
     return [
         _ChunkHit(
@@ -85,9 +113,11 @@ def _lexical_hits(
 def _semantic_hits(
     connection: sqlite3.Connection,
     query_vector: np.ndarray,
+    tag_names: tuple[str, ...] = (),
 ) -> list[_ChunkHit]:
+    tag_sql, tag_params = _tag_filter_sql(tag_names)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             c.id AS chunk_id,
             c.paper_id,
@@ -101,7 +131,10 @@ def _semantic_hits(
         FROM chunks c
         JOIN papers p ON p.id = c.paper_id
         WHERE p.status = 'ready'
+        {tag_sql}
         """
+        ,
+        tag_params,
     ).fetchall()
     if not rows:
         return []
@@ -177,6 +210,7 @@ def search_library(
     query: str,
     *,
     limit: int = 10,
+    tag_names: tuple[str, ...] = (),
     embedder: Embedder | None = None,
 ) -> list[SearchResult]:
     cleaned_query = query.strip()
@@ -188,14 +222,20 @@ def search_library(
         raise RuntimeError(
             "Recallary is not initialized. Run `recallary setup` first."
         )
+    database.initialize(settings.database_path)
 
     settings.configure_local_storage()
     active_embedder = embedder or Embedder(settings)
     query_vector = active_embedder.encode_query(cleaned_query)
 
     with database.connect(settings.database_path) as connection:
-        lexical = _lexical_hits(connection, cleaned_query)
-        semantic = _semantic_hits(connection, query_vector)
+        lexical = _lexical_hits(connection, cleaned_query, tag_names)
+        semantic = _semantic_hits(connection, query_vector, tag_names)
+        result_paper_ids = sorted(
+            {hit.paper_id for hit in lexical} | {hit.paper_id for hit in semantic}
+        )
+        tags_by_paper = database.tags_for_paper_ids(connection, result_paper_ids)
+        bibtex_by_paper = database.bibtex_for_paper_ids(connection, result_paper_ids)
 
     chunk_scores: defaultdict[int, float] = defaultdict(float)
     chunk_data: dict[int, _ChunkHit] = {}
@@ -253,6 +293,19 @@ def search_library(
             if len(selected) == 3:
                 break
         representative = hits[0][1]
+        bibtex_row = bibtex_by_paper.get(paper_id)
+        bibtex = (
+            BibTeXInfo(
+                citekey=str(bibtex_row["citekey"] or ""),
+                entry_type=str(bibtex_row["entry_type"] or ""),
+                title=str(bibtex_row["title"] or ""),
+                authors=str(bibtex_row["authors"] or ""),
+                year=str(bibtex_row["year"] or ""),
+                raw_bibtex=str(bibtex_row["raw_bibtex"] or ""),
+            )
+            if bibtex_row
+            else None
+        )
         results.append(
             SearchResult(
                 paper_id=paper_id,
@@ -262,6 +315,8 @@ def search_library(
                 relative_path=representative.relative_path,
                 score=score,
                 evidence=selected,
+                tags=tags_by_paper.get(paper_id, ()),
+                bibtex=bibtex,
             )
         )
     return results

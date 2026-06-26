@@ -194,6 +194,7 @@ def index_library(
                     embedder_factory,
                 )
 
+            manual_metadata = database.export_manual_metadata(settings.database_path)
             temporary = settings.data_dir / "recallary.rebuild.db"
             for candidate in (
                 temporary,
@@ -211,6 +212,7 @@ def index_library(
                 embedder_factory,
             )
             with database.connect(temporary) as connection:
+                database.import_manual_metadata(connection, manual_metadata)
                 check = database.integrity_check(connection)
             if check != "ok":
                 raise RuntimeError(

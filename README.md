@@ -1,20 +1,24 @@
 # Recallary
 
-Recallary is a lightweight local tool for finding papers you have already
-saved, even when you remember only a vague description. It returns a ranked
-list of likely PDFs with file paths, PDF page numbers, and source excerpts.
+Recallary is a lightweight local desktop tool for finding papers you have
+already saved, even when you remember only a vague description. It returns a
+ranked list of likely PDFs with file paths, PDF page numbers, and source
+excerpts.
 
-Recallary does not generate answers or summaries. The evidence shown in search
-results is extracted directly from the PDFs.
+Recallary does not generate answers or summaries. Evidence shown in search
+results is extracted directly from your PDFs.
 
 ## Current scope
 
+- Stores your PDFs under `library/`
+- Stores the database, model, caches, logs, and runtime files under `data/`
+- Opens as a local PySide6 desktop GUI
 - Recursively indexes text-based PDFs in `library/`
 - Updates only new, changed, or deleted files
 - Combines SQLite full-text search with a small multilingual semantic model
 - Runs the semantic model on CPU
-- Stores PDFs, indexes, the model, caches, logs, and temporary files inside
-  this repository
+- Supports manual paper tags
+- Supports manually attached BibTeX entries
 - Supports Windows and Apple Silicon macOS through separate local Conda
   environments
 - Does not perform OCR
@@ -23,12 +27,12 @@ results is extracted directly from the PDFs.
 
 ```text
 recallary/
-├── library/       # Put PDFs here
-├── data/          # Database, model, caches, logs, and runtime files
-├── src/
-├── tests/
-├── environment.yml
-└── pyproject.toml
+├─ library/       # Put PDFs here
+├─ data/          # Database, model, caches, logs, and runtime files
+├─ src/
+├─ tests/
+├─ environment.yml
+└─ pyproject.toml
 ```
 
 `library/` and `data/` are ignored by Git. They can still be synchronized by
@@ -47,63 +51,113 @@ conda env create -f environment.yml
 conda activate recallary
 ```
 
+If the environment already exists and `environment.yml` changed:
+
+```bash
+conda env update -n recallary -f environment.yml
+conda activate recallary
+```
+
 Each computer creates its own Conda environment. Do not synchronize Conda
 environment directories through OneDrive.
 
-## First setup
+## Start the GUI
 
 ```bash
-recallary setup
+recallary
 ```
 
-This command:
+The GUI lets you:
+
+- run setup and download the local model
+- add PDFs into `library/`
+- index or rebuild the library
+- search with vague natural-language descriptions
+- filter search by manual tags
+- edit tags for selected papers
+- attach or remove BibTeX entries
+- open a PDF with the system PDF reader
+- reveal a PDF in the file manager
+
+## First setup
+
+In the GUI, click:
+
+```text
+Setup / Check Model
+```
+
+This:
 
 - creates `library/` and `data/`
 - initializes `data/recallary.db`
 - downloads `intfloat/multilingual-e5-small` into `data/models/`
 
 The model download is the only normal Recallary operation that requires
-network access. `setup` does not index PDFs.
+network access. Setup does not index PDFs.
 
-## Use
+## Normal use
 
-Place PDFs anywhere under `library/`, including subdirectories, then run:
+1. Open Recallary with `recallary`.
+2. Add PDFs with `Add PDFs`, or manually copy PDFs under `library/`.
+3. Click `Index Library`.
+4. Select a paper and add tags or BibTeX if useful.
+5. Search with a description such as:
 
-```bash
-recallary index
+```text
+ankle exoskeleton using impedance control and metabolic cost
 ```
 
-Search with a natural-language description:
+Search results show likely papers, tags, BibTeX hints, page numbers, and
+evidence snippets.
 
-```bash
-recallary search "ankle exoskeleton using impedance control and metabolic cost"
-```
+## CLI fallback
 
-Limit the number of returned papers:
-
-```bash
-recallary search "AI feedback in education with limited effects" --limit 5
-```
-
-Inspect the library and database:
+The GUI is the default, but command-line commands are still available.
 
 ```bash
 recallary status
+recallary index
+recallary index --rebuild
+recallary search "AI feedback in education with limited effects"
+recallary search "impedance controller validation" --tag controller-design
 ```
 
-Rebuild the entire index:
+You can also use the explicit CLI entry point:
 
 ```bash
-recallary index --rebuild
+recallary-cli status
 ```
 
-Ordinary `index` runs are incremental:
+Manual tags:
+
+```bash
+recallary tag add "library/paper.pdf" controller-design
+recallary tag remove "library/paper.pdf" controller-design
+recallary tag list
+recallary tag show "library/paper.pdf"
+```
+
+BibTeX:
+
+```bash
+recallary bib add "library/paper.pdf" --file citation.bib
+recallary bib show "library/paper.pdf"
+recallary bib remove "library/paper.pdf"
+```
+
+## Indexing behavior
+
+Ordinary indexing is incremental:
 
 - new PDF: index it
 - changed PDF: replace that paper's index after successful processing
 - unchanged PDF: skip it
 - deleted PDF: remove its index
 - failed PDF: report the error and continue
+
+Rebuild reindexes every PDF. Manual tags and BibTeX entries are preserved by
+matching them back to PDFs through their repository-relative paths.
 
 ## OneDrive use
 
@@ -122,8 +176,10 @@ and macOS can share the same index.
 
 - Image-only or scanned PDFs are reported as `no_text`; OCR is not included.
 - PDF extraction quality depends on the document's text layer and layout.
-- Search works best when the description includes a combination of distinctive
-  details such as method, device, population, experiment, metric, or result.
+- Search works best when the description includes distinctive details such as
+  method, device, population, experiment, metric, or result.
+- The GUI opens PDFs in your system PDF reader; it does not include an embedded
+  PDF reader.
 
 ## Remove
 

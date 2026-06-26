@@ -12,6 +12,8 @@ dependencies = [
     "filelock>=3.16,<4",
     "huggingface-hub>=0.27,<2",
     "numpy>=2.1,<3",
+    "PySide6>=6.8,<7",
+    "bibtexparser>=1.4,<3",
     "pymupdf>=1.25,<2",
     "sentence-transformers>=5.1,<6",
     "typer>=0.15,<1",
@@ -24,6 +26,7 @@ dev = [
 
 [project.scripts]
 recallary = "recallary.bootstrap:main"
+recallary-cli = "recallary.bootstrap:cli_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
