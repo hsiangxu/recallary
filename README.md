@@ -75,6 +75,7 @@ The GUI lets you:
 - index or rebuild the library
 - search with vague natural-language descriptions
 - filter search by manual tags
+- edit the display name shown for a paper
 - edit tags for selected papers
 - attach or remove BibTeX entries
 - open a PDF with the system PDF reader
@@ -113,6 +114,12 @@ ankle exoskeleton using impedance control and metabolic cost
 
 Search results show likely papers, tags, BibTeX hints, page numbers, and
 evidence snippets.
+
+`Display name` lets you override how a paper appears in the GUI and search
+results. The field is prefilled from the title extracted from the PDF, so you
+can edit it directly. Saving the same text as the extracted title keeps the
+manual override empty. Use `Reset to Parsed Title` to discard a manual display
+name and return to the extracted title.
 
 `Delete Paper` does not permanently erase the PDF immediately. It moves the
 file from `library/` into `data/trash/` and removes the paper's index, tags,

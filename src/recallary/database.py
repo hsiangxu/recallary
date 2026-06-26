@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS papers (
     modified_ns INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
     authors TEXT NOT NULL DEFAULT '',
     page_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
@@ -129,6 +130,7 @@ def connect(path: Path) -> sqlite3.Connection:
 def initialize(path: Path) -> None:
     with connect(path) as connection:
         connection.executescript(SCHEMA)
+        _migrate(connection)
         connection.executemany(
             """
             INSERT INTO metadata(key, value) VALUES(?, ?)
@@ -138,6 +140,22 @@ def initialize(path: Path) -> None:
                 ("index_version", str(INDEX_VERSION)),
                 ("embedding_model", MODEL_ID),
             ),
+        )
+
+
+def _column_exists(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(str(row["name"]) == column_name for row in rows)
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    if not _column_exists(connection, "papers", "display_name"):
+        connection.execute(
+            "ALTER TABLE papers ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
         )
 
 
@@ -182,6 +200,21 @@ def list_papers(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY lower(p.title), lower(p.relative_path)
         """
     ).fetchall()
+
+
+def set_display_name_for_paper(
+    connection: sqlite3.Connection,
+    relative_path: str,
+    display_name: str,
+) -> None:
+    row = fetch_paper_by_relative_path(connection, relative_path)
+    if row is None:
+        raise ValueError(f"Paper is not indexed: {relative_path}")
+    with transaction(connection):
+        connection.execute(
+            "UPDATE papers SET display_name = ? WHERE id = ?",
+            (" ".join(display_name.strip().split()), int(row["id"])),
+        )
 
 
 def update_file_snapshot(
@@ -621,6 +654,17 @@ def export_manual_metadata(path: Path) -> dict[str, list[dict[str, Any]]]:
     with connect(path) as connection:
         if not _table_exists(connection, "tags"):
             return {"tags": [], "bibtex": []}
+        has_display_name = _column_exists(connection, "papers", "display_name")
+        display_rows: list[sqlite3.Row] = []
+        if has_display_name:
+            display_rows = connection.execute(
+                """
+                SELECT relative_path, display_name
+                FROM papers
+                WHERE display_name != ''
+                ORDER BY relative_path
+                """
+            ).fetchall()
         tag_rows = connection.execute(
             """
             SELECT p.relative_path, t.name
@@ -648,6 +692,13 @@ def export_manual_metadata(path: Path) -> dict[str, list[dict[str, Any]]]:
                 """
             ).fetchall()
     return {
+        "display_names": [
+            {
+                "relative_path": str(row["relative_path"]),
+                "display_name": str(row["display_name"]),
+            }
+            for row in display_rows
+        ],
         "tags": [
             {
                 "relative_path": str(row["relative_path"]),
@@ -674,6 +725,15 @@ def import_manual_metadata(
     connection: sqlite3.Connection,
     exported: dict[str, list[dict[str, Any]]],
 ) -> None:
+    for item in exported.get("display_names", []):
+        relative_path = str(item.get("relative_path", ""))
+        display_name = str(item.get("display_name", ""))
+        if not relative_path:
+            continue
+        try:
+            set_display_name_for_paper(connection, relative_path, display_name)
+        except ValueError:
+            continue
     for item in exported.get("tags", []):
         relative_path = str(item.get("relative_path", ""))
         tag_name = str(item.get("name", ""))

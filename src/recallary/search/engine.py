@@ -81,7 +81,7 @@ def _lexical_hits(
             c.paper_id,
             c.page_number,
             c.text,
-            p.title,
+            COALESCE(NULLIF(p.display_name, ''), p.title) AS title,
             p.authors,
             p.relative_path,
             bm25(chunks_fts, 0.0, 0.0, 5.0, 8.0, 4.0, 2.0, 1.0)
@@ -125,7 +125,7 @@ def _semantic_hits(
             c.text,
             c.embedding,
             c.embedding_dim,
-            p.title,
+            COALESCE(NULLIF(p.display_name, ''), p.title) AS title,
             p.authors,
             p.relative_path
         FROM chunks c

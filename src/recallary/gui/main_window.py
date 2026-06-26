@@ -38,6 +38,14 @@ from recallary.gui.workers import IndexWorker, SearchWorker, SetupWorker
 
 
 def _display_title(row: Any) -> str:
+    display_name = str(row["display_name"] or "").strip()
+    if display_name:
+        return display_name
+    title = str(row["title"] or "").strip()
+    return title or str(row["relative_path"])
+
+
+def _parsed_title(row: Any) -> str:
     title = str(row["title"] or "").strip()
     return title or str(row["relative_path"])
 
@@ -122,6 +130,8 @@ class MainWindow(QMainWindow):
         self.paper_list.itemSelectionChanged.connect(self.on_paper_selected)
         self.pending_list.itemSelectionChanged.connect(self.on_pending_selected)
         self.result_list.itemSelectionChanged.connect(self.on_result_selected)
+        self.save_display_name_button.clicked.connect(self.save_display_name)
+        self.reset_display_name_button.clicked.connect(self.reset_display_name)
         self.save_tags_button.clicked.connect(self.save_tags)
         self.save_bibtex_button.clicked.connect(self.save_bibtex)
         self.remove_bibtex_button.clicked.connect(self.remove_bibtex)
@@ -178,6 +188,17 @@ class MainWindow(QMainWindow):
         form.addRow("Status", self.status_label)
         form.addRow("BibTeX", self.bib_summary_label)
         layout.addLayout(form)
+
+        layout.addWidget(QLabel("Display name"))
+        self.display_name_edit = QLineEdit()
+        self.display_name_edit.setPlaceholderText("Edit the parsed PDF title")
+        display_buttons = QHBoxLayout()
+        self.save_display_name_button = QPushButton("Save Display Name")
+        self.reset_display_name_button = QPushButton("Reset to Parsed Title")
+        layout.addWidget(self.display_name_edit)
+        display_buttons.addWidget(self.save_display_name_button)
+        display_buttons.addWidget(self.reset_display_name_button)
+        layout.addLayout(display_buttons)
 
         layout.addWidget(QLabel("Tags (comma-separated)"))
         self.tags_edit = QLineEdit()
@@ -237,6 +258,8 @@ class MainWindow(QMainWindow):
             self.rebuild_button,
             self.refresh_button,
             self.search_button,
+            self.save_display_name_button,
+            self.reset_display_name_button,
             self.delete_pdf_button,
         ):
             button.setEnabled(not busy)
@@ -419,6 +442,7 @@ class MainWindow(QMainWindow):
                 self.title_label.setText(Path(relative_path).name)
                 self.path_label.setText(relative_path)
                 self.status_label.setText("not indexed yet")
+                self.display_name_edit.clear()
                 self.tags_edit.clear()
                 self.bibtex_edit.clear()
                 self.bib_summary_label.setText("none")
@@ -433,6 +457,7 @@ class MainWindow(QMainWindow):
         self.title_label.setText(_display_title(row))
         self.path_label.setText(relative_path)
         self.status_label.setText(str(row["status"]))
+        self.display_name_edit.setText(str(row["display_name"] or "") or _parsed_title(row))
         self.tags_edit.setText(", ".join(tags))
         if bibtex_row:
             self.bibtex_edit.setPlainText(str(bibtex_row["raw_bibtex"]))
@@ -458,6 +483,59 @@ class MainWindow(QMainWindow):
             if result.bibtex and isinstance(result.bibtex, BibTeXInfo):
                 pass
             self.evidence_box.setPlainText("\n".join(lines).strip())
+
+    def save_display_name(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(
+                self, "Display Name", "Select an indexed paper first."
+            )
+            return
+        try:
+            with database.connect(self.settings.database_path) as connection:
+                row = database.fetch_paper_by_relative_path(
+                    connection, self.current_relative_path
+                )
+                if row is None:
+                    raise ValueError("The selected paper is not indexed.")
+                typed_name = " ".join(self.display_name_edit.text().strip().split())
+                parsed_title = " ".join(_parsed_title(row).strip().split())
+                display_name = "" if typed_name == parsed_title else typed_name
+                database.set_display_name_for_paper(
+                    connection,
+                    self.current_relative_path,
+                    display_name,
+                )
+            current = self.current_relative_path
+            self.refresh()
+            self.show_paper(current)
+            self.statusBar().showMessage("Display name saved.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not save display name", str(error))
+
+    def reset_display_name(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(
+                self, "Display Name", "Select an indexed paper first."
+            )
+            return
+        try:
+            with database.connect(self.settings.database_path) as connection:
+                row = database.fetch_paper_by_relative_path(
+                    connection, self.current_relative_path
+                )
+                if row is None:
+                    raise ValueError("The selected paper is not indexed.")
+                database.set_display_name_for_paper(
+                    connection,
+                    self.current_relative_path,
+                    "",
+                )
+            current = self.current_relative_path
+            self.refresh()
+            self.show_paper(current)
+            self.statusBar().showMessage("Display name reset to parsed title.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not reset display name", str(error))
 
     def save_tags(self) -> None:
         if not self.current_relative_path:
@@ -635,6 +713,7 @@ class MainWindow(QMainWindow):
             self.path_label.clear()
             self.status_label.clear()
             self.bib_summary_label.clear()
+            self.display_name_edit.clear()
             self.tags_edit.clear()
             self.bibtex_edit.clear()
             self.evidence_box.clear()

@@ -130,6 +130,11 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
         database.add_tag_to_paper(
             connection, "library/ankle.pdf", "controller-design"
         )
+        database.set_display_name_for_paper(
+            connection,
+            "library/ankle.pdf",
+            "My preferred ankle controller paper",
+        )
         database.save_bibtex_for_paper(
             connection,
             "library/ankle.pdf",
@@ -149,6 +154,7 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
     )
 
     assert filtered[0].relative_path == "library/ankle.pdf"
+    assert filtered[0].title == "My preferred ankle controller paper"
     assert filtered[0].tags == ("controller-design",)
     assert filtered[0].bibtex
     assert filtered[0].bibtex.citekey == "smith2024ankle"
@@ -158,6 +164,7 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
     with database.connect(settings.database_path) as connection:
         row = database.fetch_paper_by_relative_path(connection, "library/ankle.pdf")
         assert row is not None
+        assert row["display_name"] == "My preferred ankle controller paper"
         assert database.tags_for_paper(connection, int(row["id"])) == (
             "controller-design",
         )
