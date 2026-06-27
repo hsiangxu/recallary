@@ -145,6 +145,12 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
             authors="Smith, Jane",
             year="2024",
         )
+        database.save_note_for_paper(
+            connection,
+            "library/ankle.pdf",
+            "This is my personal note about limited classroom feedback effects.",
+            embedding=_vector("limited classroom feedback effects"),
+        )
 
     filtered = search_library(
         settings,
@@ -159,6 +165,18 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
     assert filtered[0].bibtex
     assert filtered[0].bibtex.citekey == "smith2024ankle"
 
+    note_results = search_library(
+        settings,
+        "limited classroom feedback effects",
+        embedder=FakeEmbedder(settings),
+    )
+    assert note_results[0].relative_path == "library/ankle.pdf"
+    assert any(
+        evidence.source_type == "note"
+        and "limited classroom feedback" in evidence.text
+        for evidence in note_results[0].evidence
+    )
+
     index_library(settings, rebuild=True, embedder_factory=FakeEmbedder)
 
     with database.connect(settings.database_path) as connection:
@@ -171,3 +189,6 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
         bibtex = database.bibtex_for_paper(connection, int(row["id"]))
         assert bibtex is not None
         assert bibtex["citekey"] == "smith2024ankle"
+        note = database.note_for_paper(connection, int(row["id"]))
+        assert note is not None
+        assert "limited classroom feedback" in note["content"]

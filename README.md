@@ -78,6 +78,7 @@ The GUI lets you:
 - edit the display name shown for a paper
 - edit tags for selected papers
 - attach or remove BibTeX entries
+- write searchable notes for selected papers
 - open a PDF with the system PDF reader
 - reveal a PDF in the file manager
 - delete a paper by moving its PDF to `data/trash/` and removing its index
@@ -105,7 +106,8 @@ network access. Setup does not index PDFs.
 2. Add PDFs with `Add PDFs`, or manually copy PDFs under `library/`.
 3. Confirm newly added PDFs appear under `Pending PDFs`.
 4. Click `Index Library`.
-5. Select a paper and add tags or BibTeX if useful.
+5. Select a paper and use the right-side tabs to edit display name, tags,
+   BibTeX, or notes.
 6. Search with a description such as:
 
 ```text
@@ -113,7 +115,8 @@ ankle exoskeleton using impedance control and metabolic cost
 ```
 
 Search results show likely papers, tags, BibTeX hints, page numbers, and
-evidence snippets.
+evidence snippets. PDF matches are shown as `PDF page ...`; note matches are
+shown separately as `Note evidence`.
 
 `Display name` lets you override how a paper appears in the GUI and search
 results. The field is prefilled from the title extracted from the PDF, so you
@@ -121,9 +124,15 @@ can edit it directly. Saving the same text as the extracted title keeps the
 manual override empty. Use `Reset to Parsed Title` to discard a manual display
 name and return to the extracted title.
 
+`Notes` are personal searchable text linked to a paper. Notes are not treated
+as PDF text and do not get page numbers. If a note helps match a search query,
+Recallary shows it as note evidence so it is clear that the text came from you,
+not from the PDF. To delete notes, clear the Notes text box and click
+`Save Notes`.
+
 `Delete Paper` does not permanently erase the PDF immediately. It moves the
 file from `library/` into `data/trash/` and removes the paper's index, tags,
-and BibTeX entry from the database.
+BibTeX entry, and notes from the database.
 
 
 ## CLI fallback

@@ -63,6 +63,16 @@ CREATE TABLE IF NOT EXISTS bibtex_entries (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS paper_notes (
+    id INTEGER PRIMARY KEY,
+    paper_id INTEGER NOT NULL UNIQUE REFERENCES papers(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    embedding BLOB NOT NULL DEFAULT X'',
+    embedding_dim INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pages (
     id INTEGER PRIMARY KEY,
     paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
@@ -96,12 +106,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS paper_notes_fts USING fts5(
+    note_id UNINDEXED,
+    paper_id UNINDEXED,
+    title,
+    content,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
 CREATE INDEX IF NOT EXISTS idx_pages_paper ON pages(paper_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_paper ON chunks(paper_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id);
 CREATE INDEX IF NOT EXISTS idx_papers_status ON papers(status);
 CREATE INDEX IF NOT EXISTS idx_paper_tags_tag ON paper_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_bibtex_paper ON bibtex_entries(paper_id);
+CREATE INDEX IF NOT EXISTS idx_notes_paper ON paper_notes(paper_id);
 """
 
 
@@ -215,6 +234,23 @@ def set_display_name_for_paper(
             "UPDATE papers SET display_name = ? WHERE id = ?",
             (" ".join(display_name.strip().split()), int(row["id"])),
         )
+        updated = fetch_paper_by_relative_path(connection, relative_path)
+        if updated is not None:
+            connection.execute(
+                """
+                UPDATE paper_notes_fts
+                SET title = ?
+                WHERE paper_id = ?
+                """,
+                (
+                    str(
+                        updated["display_name"]
+                        or updated["title"]
+                        or updated["filename"]
+                    ),
+                    int(updated["id"]),
+                ),
+            )
 
 
 def update_file_snapshot(
@@ -420,6 +456,10 @@ def remove_papers(
             ((paper_id,) for paper_id in paper_ids),
         )
         connection.executemany(
+            "DELETE FROM paper_notes_fts WHERE paper_id = ?",
+            ((paper_id,) for paper_id in paper_ids),
+        )
+        connection.executemany(
             "DELETE FROM papers WHERE id = ?",
             ((paper_id,) for paper_id in paper_ids),
         )
@@ -621,6 +661,118 @@ def remove_bibtex_from_paper(
         )
 
 
+def note_for_paper(
+    connection: sqlite3.Connection,
+    paper_id: int,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM paper_notes WHERE paper_id = ?",
+        (paper_id,),
+    ).fetchone()
+
+
+def notes_for_paper_ids(
+    connection: sqlite3.Connection,
+    paper_ids: Sequence[int],
+) -> dict[int, sqlite3.Row]:
+    if not paper_ids:
+        return {}
+    placeholders = ",".join("?" for _ in paper_ids)
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM paper_notes
+        WHERE paper_id IN ({placeholders})
+        """,
+        tuple(paper_ids),
+    ).fetchall()
+    return {int(row["paper_id"]): row for row in rows}
+
+
+def save_note_for_paper(
+    connection: sqlite3.Connection,
+    relative_path: str,
+    content: str,
+    embedding: np.ndarray | bytes | None = None,
+) -> None:
+    text = content.strip()
+    row = fetch_paper_by_relative_path(connection, relative_path)
+    if row is None:
+        raise ValueError(f"Paper is not indexed: {relative_path}")
+    paper_id = int(row["id"])
+    if isinstance(embedding, bytes):
+        embedding_blob = embedding
+        embedding_dim = len(embedding_blob) // np.dtype(np.float32).itemsize
+    elif embedding is None:
+        embedding_blob = b""
+        embedding_dim = 0
+    else:
+        vector = np.asarray(embedding, dtype=np.float32)
+        embedding_blob = vector.tobytes()
+        embedding_dim = int(vector.size)
+
+    now = utc_now()
+    with transaction(connection):
+        if not text:
+            existing = connection.execute(
+                "SELECT id FROM paper_notes WHERE paper_id = ?",
+                (paper_id,),
+            ).fetchone()
+            if existing:
+                note_id = int(existing["id"])
+                connection.execute(
+                    "DELETE FROM paper_notes_fts WHERE note_id = ?",
+                    (note_id,),
+                )
+            connection.execute(
+                "DELETE FROM paper_notes WHERE paper_id = ?",
+                (paper_id,),
+            )
+            return
+
+        existing = connection.execute(
+            "SELECT id, created_at FROM paper_notes WHERE paper_id = ?",
+            (paper_id,),
+        ).fetchone()
+        if existing:
+            note_id = int(existing["id"])
+            connection.execute(
+                """
+                UPDATE paper_notes
+                SET content = ?, embedding = ?, embedding_dim = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (text, embedding_blob, embedding_dim, now, note_id),
+            )
+            connection.execute(
+                "DELETE FROM paper_notes_fts WHERE note_id = ?",
+                (note_id,),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO paper_notes(
+                    paper_id, content, embedding, embedding_dim, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (paper_id, text, embedding_blob, embedding_dim, now, now),
+            )
+            note_id = int(cursor.lastrowid)
+
+        connection.execute(
+            """
+            INSERT INTO paper_notes_fts(note_id, paper_id, title, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                note_id,
+                paper_id,
+                str(row["display_name"] or row["title"] or row["filename"]),
+                text,
+            ),
+        )
+
+
 def manual_metadata_counts(connection: sqlite3.Connection) -> dict[str, int]:
     tag_count = connection.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
     tagged_papers = connection.execute(
@@ -629,10 +781,14 @@ def manual_metadata_counts(connection: sqlite3.Connection) -> dict[str, int]:
     bibtex_count = connection.execute(
         "SELECT COUNT(*) FROM bibtex_entries"
     ).fetchone()[0]
+    notes_count = connection.execute(
+        "SELECT COUNT(*) FROM paper_notes"
+    ).fetchone()[0]
     return {
         "tags": int(tag_count),
         "tagged_papers": int(tagged_papers),
         "bibtex_entries": int(bibtex_count),
+        "notes": int(notes_count),
     }
 
 
@@ -691,6 +847,20 @@ def export_manual_metadata(path: Path) -> dict[str, list[dict[str, Any]]]:
                 ORDER BY p.relative_path
                 """
             ).fetchall()
+        note_rows: list[sqlite3.Row] = []
+        if _table_exists(connection, "paper_notes"):
+            note_rows = connection.execute(
+                """
+                SELECT
+                    p.relative_path,
+                    n.content,
+                    n.embedding,
+                    n.embedding_dim
+                FROM paper_notes n
+                JOIN papers p ON p.id = n.paper_id
+                ORDER BY p.relative_path
+                """
+            ).fetchall()
     return {
         "display_names": [
             {
@@ -717,6 +887,15 @@ def export_manual_metadata(path: Path) -> dict[str, list[dict[str, Any]]]:
                 "raw_bibtex": str(row["raw_bibtex"] or ""),
             }
             for row in bibtex_rows
+        ],
+        "notes": [
+            {
+                "relative_path": str(row["relative_path"]),
+                "content": str(row["content"] or ""),
+                "embedding": bytes(row["embedding"] or b""),
+                "embedding_dim": int(row["embedding_dim"] or 0),
+            }
+            for row in note_rows
         ],
     }
 
@@ -758,6 +937,21 @@ def import_manual_metadata(
                 title=str(item.get("title", "")),
                 authors=str(item.get("authors", "")),
                 year=str(item.get("year", "")),
+            )
+        except ValueError:
+            continue
+    for item in exported.get("notes", []):
+        relative_path = str(item.get("relative_path", ""))
+        content = str(item.get("content", ""))
+        embedding = item.get("embedding", b"")
+        if not relative_path or not content:
+            continue
+        try:
+            save_note_for_paper(
+                connection,
+                relative_path,
+                content,
+                embedding=embedding if isinstance(embedding, bytes) else None,
             )
         except ValueError:
             continue

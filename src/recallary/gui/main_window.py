@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self.save_tags_button.clicked.connect(self.save_tags)
         self.save_bibtex_button.clicked.connect(self.save_bibtex)
         self.remove_bibtex_button.clicked.connect(self.remove_bibtex)
+        self.save_notes_button.clicked.connect(self.save_notes)
         self.open_pdf_button.clicked.connect(self.open_pdf)
         self.reveal_pdf_button.clicked.connect(self.reveal_pdf)
         self.delete_pdf_button.clicked.connect(self.delete_paper)
@@ -175,6 +177,11 @@ class MainWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        self.detail_tabs = QTabWidget()
+        layout.addWidget(self.detail_tabs, 1)
+
+        basic_tab = QWidget()
+        basic_layout = QVBoxLayout(basic_tab)
         form = QFormLayout()
         self.title_label = QLabel("")
         self.title_label.setWordWrap(True)
@@ -187,34 +194,18 @@ class MainWindow(QMainWindow):
         form.addRow("Path", self.path_label)
         form.addRow("Status", self.status_label)
         form.addRow("BibTeX", self.bib_summary_label)
-        layout.addLayout(form)
+        basic_layout.addLayout(form)
 
-        layout.addWidget(QLabel("Display name"))
+        basic_layout.addWidget(QLabel("Display name"))
         self.display_name_edit = QLineEdit()
         self.display_name_edit.setPlaceholderText("Edit the parsed PDF title")
         display_buttons = QHBoxLayout()
         self.save_display_name_button = QPushButton("Save Display Name")
         self.reset_display_name_button = QPushButton("Reset to Parsed Title")
-        layout.addWidget(self.display_name_edit)
+        basic_layout.addWidget(self.display_name_edit)
         display_buttons.addWidget(self.save_display_name_button)
         display_buttons.addWidget(self.reset_display_name_button)
-        layout.addLayout(display_buttons)
-
-        layout.addWidget(QLabel("Tags (comma-separated)"))
-        self.tags_edit = QLineEdit()
-        self.save_tags_button = QPushButton("Save Tags")
-        layout.addWidget(self.tags_edit)
-        layout.addWidget(self.save_tags_button)
-
-        layout.addWidget(QLabel("BibTeX"))
-        self.bibtex_edit = QTextEdit()
-        layout.addWidget(self.bibtex_edit, 1)
-        bib_buttons = QHBoxLayout()
-        self.save_bibtex_button = QPushButton("Save BibTeX")
-        self.remove_bibtex_button = QPushButton("Remove BibTeX")
-        bib_buttons.addWidget(self.save_bibtex_button)
-        bib_buttons.addWidget(self.remove_bibtex_button)
-        layout.addLayout(bib_buttons)
+        basic_layout.addLayout(display_buttons)
 
         pdf_buttons = QHBoxLayout()
         self.open_pdf_button = QPushButton("Open PDF")
@@ -223,7 +214,45 @@ class MainWindow(QMainWindow):
         pdf_buttons.addWidget(self.open_pdf_button)
         pdf_buttons.addWidget(self.reveal_pdf_button)
         pdf_buttons.addWidget(self.delete_pdf_button)
-        layout.addLayout(pdf_buttons)
+        basic_layout.addLayout(pdf_buttons)
+        basic_layout.addStretch(1)
+
+        tags_tab = QWidget()
+        tags_layout = QVBoxLayout(tags_tab)
+        tags_layout.addWidget(QLabel("Tags (comma-separated)"))
+        self.tags_edit = QLineEdit()
+        self.save_tags_button = QPushButton("Save Tags")
+        tags_layout.addWidget(self.tags_edit)
+        tags_layout.addWidget(self.save_tags_button)
+        tags_layout.addStretch(1)
+
+        bibtex_tab = QWidget()
+        bibtex_layout = QVBoxLayout(bibtex_tab)
+        bibtex_layout.addWidget(QLabel("BibTeX"))
+        self.bibtex_edit = QTextEdit()
+        bibtex_layout.addWidget(self.bibtex_edit, 1)
+        bib_buttons = QHBoxLayout()
+        self.save_bibtex_button = QPushButton("Save BibTeX")
+        self.remove_bibtex_button = QPushButton("Remove BibTeX")
+        bib_buttons.addWidget(self.save_bibtex_button)
+        bib_buttons.addWidget(self.remove_bibtex_button)
+        bibtex_layout.addLayout(bib_buttons)
+
+        notes_tab = QWidget()
+        notes_layout = QVBoxLayout(notes_tab)
+        notes_layout.addWidget(QLabel("Notes"))
+        self.notes_edit = QTextEdit()
+        self.notes_edit.setPlaceholderText(
+            "Write personal search notes for this paper. Notes are searchable."
+        )
+        notes_layout.addWidget(self.notes_edit, 1)
+        self.save_notes_button = QPushButton("Save Notes")
+        notes_layout.addWidget(self.save_notes_button)
+
+        self.detail_tabs.addTab(basic_tab, "Basic")
+        self.detail_tabs.addTab(tags_tab, "Tags")
+        self.detail_tabs.addTab(bibtex_tab, "BibTeX")
+        self.detail_tabs.addTab(notes_tab, "Notes")
         return panel
 
     def _checked_tags(self) -> tuple[str, ...]:
@@ -260,6 +289,10 @@ class MainWindow(QMainWindow):
             self.search_button,
             self.save_display_name_button,
             self.reset_display_name_button,
+            self.save_tags_button,
+            self.save_bibtex_button,
+            self.remove_bibtex_button,
+            self.save_notes_button,
             self.delete_pdf_button,
         ):
             button.setEnabled(not busy)
@@ -445,14 +478,17 @@ class MainWindow(QMainWindow):
                 self.display_name_edit.clear()
                 self.tags_edit.clear()
                 self.bibtex_edit.clear()
+                self.notes_edit.clear()
                 self.bib_summary_label.setText("none")
                 self.evidence_box.setPlainText(
                     "This PDF is in library/ but has not been indexed yet.\n\n"
-                    "Click Index Library to make it searchable and enable tags/BibTeX."
+                    "Click Index Library to make it searchable and enable "
+                    "tags/BibTeX/notes."
                 )
                 return
             tags = database.tags_for_paper(connection, int(row["id"]))
             bibtex_row = database.bibtex_for_paper(connection, int(row["id"]))
+            note_row = database.note_for_paper(connection, int(row["id"]))
 
         self.title_label.setText(_display_title(row))
         self.path_label.setText(relative_path)
@@ -473,11 +509,15 @@ class MainWindow(QMainWindow):
         else:
             self.bibtex_edit.clear()
             self.bib_summary_label.setText("none")
+        self.notes_edit.setPlainText(str(note_row["content"]) if note_row else "")
 
         if result:
             lines: list[str] = []
             for evidence in result.evidence:
-                lines.append(f"PDF page {evidence.page_number}")
+                if evidence.source_type == "pdf":
+                    lines.append(f"PDF page {evidence.page_number}")
+                else:
+                    lines.append("Note evidence")
                 lines.append(evidence.text)
                 lines.append("")
             if result.bibtex and isinstance(result.bibtex, BibTeXInfo):
@@ -606,6 +646,39 @@ class MainWindow(QMainWindow):
         except Exception as error:
             QMessageBox.critical(self, "Could not remove BibTeX", str(error))
 
+    def _encode_note(self, content: str) -> Any:
+        if not content.strip():
+            return None
+        if not model_is_installed(self.settings.model_dir):
+            return None
+        from recallary.indexing.embedder import Embedder
+
+        return Embedder(self.settings).encode_passages([content])[0]
+
+    def save_notes(self) -> None:
+        if not self.current_relative_path:
+            QMessageBox.warning(self, "Notes", "Select an indexed paper first.")
+            return
+        content = self.notes_edit.toPlainText().strip()
+        try:
+            embedding = self._encode_note(content)
+            with database.connect(self.settings.database_path) as connection:
+                database.save_note_for_paper(
+                    connection,
+                    self.current_relative_path,
+                    content,
+                    embedding=embedding,
+                )
+            self.show_paper(self.current_relative_path)
+            if content and embedding is None:
+                self.statusBar().showMessage(
+                    "Notes saved for keyword search. Run setup to enable semantic note search."
+                )
+            else:
+                self.statusBar().showMessage("Notes saved.")
+        except Exception as error:
+            QMessageBox.critical(self, "Could not save notes", str(error))
+
     def add_pdfs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -669,8 +742,8 @@ class MainWindow(QMainWindow):
         message = (
             "Delete this paper from Recallary?\n\n"
             f"{self.current_relative_path}\n\n"
-            "The PDF will be moved to data/trash/ and its index, tags, and BibTeX "
-            "entry will be removed from the database."
+            "The PDF will be moved to data/trash/ and its index, tags, BibTeX, "
+            "and notes will be removed from the database."
         )
         if path and not path.exists():
             message = (
@@ -716,6 +789,7 @@ class MainWindow(QMainWindow):
             self.display_name_edit.clear()
             self.tags_edit.clear()
             self.bibtex_edit.clear()
+            self.notes_edit.clear()
             self.evidence_box.clear()
             self.result_list.clear()
             self.refresh()

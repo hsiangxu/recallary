@@ -56,7 +56,8 @@ class IndexSummary:
 
 @dataclass(frozen=True)
 class SearchEvidence:
-    page_number: int
+    source_type: str
+    page_number: int | None
     text: str
     score: float
 

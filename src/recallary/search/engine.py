@@ -18,10 +18,11 @@ RETRIEVAL_LIMIT = 100
 
 
 @dataclass(frozen=True)
-class _ChunkHit:
-    chunk_id: int
+class _EvidenceHit:
+    source_type: str
+    source_id: int
     paper_id: int
-    page_number: int
+    page_number: int | None
     text: str
     title: str
     authors: str
@@ -69,7 +70,7 @@ def _tag_filter_sql(tag_names: tuple[str, ...], paper_alias: str = "p") -> tuple
 
 def _lexical_hits(
     connection: sqlite3.Connection, query: str, tag_names: tuple[str, ...] = ()
-) -> list[_ChunkHit]:
+) -> list[_EvidenceHit]:
     match = _fts_query(query)
     if not match:
         return []
@@ -97,8 +98,9 @@ def _lexical_hits(
         (match, *tag_params, RETRIEVAL_LIMIT),
     ).fetchall()
     return [
-        _ChunkHit(
-            chunk_id=int(row["chunk_id"]),
+        _EvidenceHit(
+            source_type="pdf",
+            source_id=int(row["chunk_id"]),
             paper_id=int(row["paper_id"]),
             page_number=int(row["page_number"]),
             text=str(row["text"]),
@@ -114,7 +116,7 @@ def _semantic_hits(
     connection: sqlite3.Connection,
     query_vector: np.ndarray,
     tag_names: tuple[str, ...] = (),
-) -> list[_ChunkHit]:
+) -> list[_EvidenceHit]:
     tag_sql, tag_params = _tag_filter_sql(tag_names)
     rows = connection.execute(
         f"""
@@ -162,10 +164,118 @@ def _semantic_hits(
         indices = selected[np.argsort(-similarities[selected])]
 
     return [
-        _ChunkHit(
-            chunk_id=int(valid_rows[index]["chunk_id"]),
+        _EvidenceHit(
+            source_type="pdf",
+            source_id=int(valid_rows[index]["chunk_id"]),
             paper_id=int(valid_rows[index]["paper_id"]),
             page_number=int(valid_rows[index]["page_number"]),
+            text=str(valid_rows[index]["text"]),
+            title=str(valid_rows[index]["title"]),
+            authors=str(valid_rows[index]["authors"]),
+            relative_path=str(valid_rows[index]["relative_path"]),
+        )
+        for index in indices
+    ]
+
+
+def _note_lexical_hits(
+    connection: sqlite3.Connection, query: str, tag_names: tuple[str, ...] = ()
+) -> list[_EvidenceHit]:
+    match = _fts_query(query)
+    if not match:
+        return []
+    tag_sql, tag_params = _tag_filter_sql(tag_names)
+    rows = connection.execute(
+        f"""
+        SELECT
+            n.id AS note_id,
+            n.paper_id,
+            n.content AS text,
+            COALESCE(NULLIF(p.display_name, ''), p.title) AS title,
+            p.authors,
+            p.relative_path,
+            bm25(paper_notes_fts, 4.0, 8.0) AS lexical_score
+        FROM paper_notes_fts
+        JOIN paper_notes n ON n.id = paper_notes_fts.note_id
+        JOIN papers p ON p.id = n.paper_id
+        WHERE paper_notes_fts MATCH ? AND p.status = 'ready'
+        {tag_sql}
+        ORDER BY lexical_score ASC
+        LIMIT ?
+        """,
+        (match, *tag_params, RETRIEVAL_LIMIT),
+    ).fetchall()
+    return [
+        _EvidenceHit(
+            source_type="note",
+            source_id=int(row["note_id"]),
+            paper_id=int(row["paper_id"]),
+            page_number=None,
+            text=str(row["text"]),
+            title=str(row["title"]),
+            authors=str(row["authors"]),
+            relative_path=str(row["relative_path"]),
+        )
+        for row in rows
+    ]
+
+
+def _note_semantic_hits(
+    connection: sqlite3.Connection,
+    query_vector: np.ndarray,
+    tag_names: tuple[str, ...] = (),
+) -> list[_EvidenceHit]:
+    tag_sql, tag_params = _tag_filter_sql(tag_names)
+    rows = connection.execute(
+        f"""
+        SELECT
+            n.id AS note_id,
+            n.paper_id,
+            n.content AS text,
+            n.embedding,
+            n.embedding_dim,
+            COALESCE(NULLIF(p.display_name, ''), p.title) AS title,
+            p.authors,
+            p.relative_path
+        FROM paper_notes n
+        JOIN papers p ON p.id = n.paper_id
+        WHERE p.status = 'ready'
+          AND n.embedding_dim > 0
+        {tag_sql}
+        """,
+        tag_params,
+    ).fetchall()
+    if not rows:
+        return []
+
+    valid_rows: list[sqlite3.Row] = []
+    vectors: list[np.ndarray] = []
+    for row in rows:
+        dimension = int(row["embedding_dim"])
+        if dimension != int(query_vector.size):
+            continue
+        vector = np.frombuffer(row["embedding"], dtype=np.float32)
+        if vector.size == dimension:
+            valid_rows.append(row)
+            vectors.append(vector)
+    if not vectors:
+        return []
+
+    matrix = np.vstack(vectors)
+    similarities = matrix @ query_vector
+    count = min(RETRIEVAL_LIMIT, len(similarities))
+    if count == len(similarities):
+        indices = np.argsort(-similarities)
+    else:
+        selected = np.argpartition(-similarities, count - 1)[:count]
+        indices = selected[np.argsort(-similarities[selected])]
+
+    return [
+        _EvidenceHit(
+            source_type="note",
+            source_id=int(valid_rows[index]["note_id"]),
+            paper_id=int(valid_rows[index]["paper_id"]),
+            page_number=None,
             text=str(valid_rows[index]["text"]),
             title=str(valid_rows[index]["title"]),
             authors=str(valid_rows[index]["authors"]),
@@ -231,41 +341,58 @@ def search_library(
     with database.connect(settings.database_path) as connection:
         lexical = _lexical_hits(connection, cleaned_query, tag_names)
         semantic = _semantic_hits(connection, query_vector, tag_names)
+        note_lexical = _note_lexical_hits(connection, cleaned_query, tag_names)
+        note_semantic = _note_semantic_hits(connection, query_vector, tag_names)
         result_paper_ids = sorted(
-            {hit.paper_id for hit in lexical} | {hit.paper_id for hit in semantic}
+            {hit.paper_id for hit in lexical}
+            | {hit.paper_id for hit in semantic}
+            | {hit.paper_id for hit in note_lexical}
+            | {hit.paper_id for hit in note_semantic}
         )
         tags_by_paper = database.tags_for_paper_ids(connection, result_paper_ids)
         bibtex_by_paper = database.bibtex_for_paper_ids(connection, result_paper_ids)
 
-    chunk_scores: defaultdict[int, float] = defaultdict(float)
-    chunk_data: dict[int, _ChunkHit] = {}
-    source_count: defaultdict[int, int] = defaultdict(int)
-    for hits in (lexical, semantic):
-        seen: set[int] = set()
+    hit_scores: defaultdict[tuple[str, int], float] = defaultdict(float)
+    hit_data: dict[tuple[str, int], _EvidenceHit] = {}
+    source_count: defaultdict[tuple[str, int], int] = defaultdict(int)
+    for hits in (lexical, semantic, note_lexical, note_semantic):
+        seen: set[tuple[str, int]] = set()
         for rank, hit in enumerate(hits, start=1):
-            chunk_scores[hit.chunk_id] += 1.0 / (RRF_K + rank)
-            chunk_data[hit.chunk_id] = hit
-            if hit.chunk_id not in seen:
-                source_count[hit.chunk_id] += 1
-                seen.add(hit.chunk_id)
+            key = (hit.source_type, hit.source_id)
+            hit_scores[key] += 1.0 / (RRF_K + rank)
+            hit_data[key] = hit
+            if key not in seen:
+                source_count[key] += 1
+                seen.add(key)
 
-    paper_hits: defaultdict[int, list[tuple[float, _ChunkHit]]] = defaultdict(list)
-    for chunk_id, score in chunk_scores.items():
-        if source_count[chunk_id] == 2:
+    paper_hits: defaultdict[int, list[tuple[float, _EvidenceHit]]] = defaultdict(list)
+    for key, score in hit_scores.items():
+        if source_count[key] >= 2:
             score *= 1.08
-        hit = chunk_data[chunk_id]
+        hit = hit_data[key]
+        if hit.source_type == "note":
+            score *= 0.95
         paper_hits[hit.paper_id].append((score, hit))
 
-    ranked_papers: list[tuple[float, int, list[tuple[float, _ChunkHit]]]] = []
+    ranked_papers: list[tuple[float, int, list[tuple[float, _EvidenceHit]]]] = []
     query_token_set = set(_query_tokens(cleaned_query))
     for paper_id, hits in paper_hits.items():
         hits.sort(key=lambda item: item[0], reverse=True)
         score = hits[0][0]
-        used_pages = {hits[0][1].page_number}
+        used_pages = (
+            {hits[0][1].page_number}
+            if hits[0][1].source_type == "pdf"
+            else set()
+        )
+        used_note = hits[0][1].source_type == "note"
         for hit_score, hit in hits[1:]:
-            if hit.page_number not in used_pages:
+            if hit.source_type == "pdf" and hit.page_number not in used_pages:
                 score += hit_score * 0.45
                 used_pages.add(hit.page_number)
+                break
+            if hit.source_type == "note" and not used_note:
+                score += hit_score * 0.35
+                used_note = True
                 break
         title_tokens = set(_query_tokens(hits[0][1].title))
         if query_token_set:
@@ -279,17 +406,24 @@ def search_library(
     for score, paper_id, hits in ranked_papers[:limit]:
         selected: list[SearchEvidence] = []
         used_pages: set[int] = set()
+        used_note = False
         for hit_score, hit in hits:
-            if hit.page_number in used_pages:
+            if hit.source_type == "pdf" and hit.page_number in used_pages:
+                continue
+            if hit.source_type == "note" and used_note:
                 continue
             selected.append(
                 SearchEvidence(
+                    source_type=hit.source_type,
                     page_number=hit.page_number,
                     text=_evidence_snippet(hit.text, cleaned_query),
                     score=hit_score,
                 )
             )
-            used_pages.add(hit.page_number)
+            if hit.source_type == "pdf" and hit.page_number is not None:
+                used_pages.add(hit.page_number)
+            if hit.source_type == "note":
+                used_note = True
             if len(selected) == 3:
                 break
         representative = hits[0][1]
