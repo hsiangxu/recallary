@@ -15,7 +15,7 @@ from filelock import FileLock, Timeout
 from recallary.config import Settings
 
 
-READY_TIMEOUT_SECONDS = 10.0
+READY_TIMEOUT_SECONDS = 30.0
 READY_POLL_SECONDS = 0.2
 
 
