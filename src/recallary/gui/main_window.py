@@ -49,12 +49,18 @@ def _display_title(row: Any) -> str:
     if display_name:
         return display_name
     title = str(row["title"] or "").strip()
-    return title or str(row["relative_path"])
+    if title:
+        return title
+    filename = str(row["filename"] or "").strip()
+    return filename or Path(str(row["relative_path"])).name
 
 
 def _parsed_title(row: Any) -> str:
     title = str(row["title"] or "").strip()
-    return title or str(row["relative_path"])
+    if title:
+        return title
+    filename = str(row["filename"] or "").strip()
+    return filename or Path(str(row["relative_path"])).name
 
 
 def _unique_destination(directory: Path, filename: str) -> Path:
@@ -187,12 +193,15 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.title_label = QLabel("")
         self.title_label.setWordWrap(True)
+        self.filename_label = QLabel("")
+        self.filename_label.setWordWrap(True)
         self.path_label = QLabel("")
         self.path_label.setWordWrap(True)
         self.status_label = QLabel("")
         self.bib_summary_label = QLabel("")
         self.bib_summary_label.setWordWrap(True)
-        form.addRow("Title", self.title_label)
+        form.addRow("Display name", self.title_label)
+        form.addRow("PDF file", self.filename_label)
         form.addRow("Path", self.path_label)
         form.addRow("Status", self.status_label)
         form.addRow("BibTeX", self.bib_summary_label)
@@ -314,7 +323,7 @@ class MainWindow(QMainWindow):
         for row in papers:
             status = str(row["status"])
             suffix = "" if status == "ready" else f" [{status}]"
-            item = QListWidgetItem(f"{_display_title(row)}{suffix}\n{row['relative_path']}")
+            item = QListWidgetItem(f"{_display_title(row)}{suffix}")
             item.setData(Qt.ItemDataRole.UserRole, str(row["relative_path"]))
             self.paper_list.addItem(item)
 
@@ -470,6 +479,7 @@ class MainWindow(QMainWindow):
             row = database.fetch_paper_by_relative_path(connection, relative_path)
             if row is None:
                 self.title_label.setText(Path(relative_path).name)
+                self.filename_label.setText(Path(relative_path).name)
                 self.path_label.setText(relative_path)
                 self.status_label.setText("not indexed yet")
                 self.display_name_edit.clear()
@@ -488,6 +498,7 @@ class MainWindow(QMainWindow):
             note_row = database.note_for_paper(connection, int(row["id"]))
 
         self.title_label.setText(_display_title(row))
+        self.filename_label.setText(str(row["filename"] or Path(relative_path).name))
         self.path_label.setText(relative_path)
         self.status_label.setText(str(row["status"]))
         self.display_name_edit.setText(str(row["display_name"] or "") or _parsed_title(row))
@@ -805,6 +816,7 @@ class MainWindow(QMainWindow):
             self.current_relative_path = None
             self.current_result = None
             self.title_label.clear()
+            self.filename_label.clear()
             self.path_label.clear()
             self.status_label.clear()
             self.bib_summary_label.clear()

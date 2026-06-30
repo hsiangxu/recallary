@@ -216,7 +216,16 @@ def list_papers(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             b.year AS bibtex_year
         FROM papers p
         LEFT JOIN bibtex_entries b ON b.paper_id = p.id
-        ORDER BY lower(p.title), lower(p.relative_path)
+        ORDER BY
+            lower(
+                COALESCE(
+                    NULLIF(p.display_name, ''),
+                    NULLIF(p.title, ''),
+                    NULLIF(p.filename, ''),
+                    p.relative_path
+                )
+            ),
+            lower(p.relative_path)
         """
     ).fetchall()
 
