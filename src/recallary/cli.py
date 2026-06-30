@@ -10,7 +10,11 @@ from recallary import database
 from recallary.bibtex import parse_bibtex
 from recallary.config import DEFAULT_LIMIT, MODEL_ID, Settings
 from recallary.indexing.embedder import download_model, model_is_installed
-from recallary.indexing.indexer import index_library, scan_library
+from recallary.indexing.indexer import (
+    index_library,
+    pending_reason_for_snapshot,
+    scan_library,
+)
 from recallary.launchers import make_launcher
 from recallary.search.engine import search_library
 
@@ -191,13 +195,7 @@ def status() -> None:
     pending = 0
     for snapshot in scan_library(settings):
         row = existing.get(snapshot.relative_path)
-        if (
-            row is None
-            or int(row["file_size"]) != snapshot.size
-            or int(row["modified_ns"]) != snapshot.modified_ns
-            or str(row["status"]) != "ready"
-            or bool(row["error_message"])
-        ):
+        if pending_reason_for_snapshot(row, snapshot, verify_hash=True):
             pending += 1
 
     typer.echo(f"Database integrity: {integrity}")

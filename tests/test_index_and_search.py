@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -5,7 +6,11 @@ import pymupdf
 
 from recallary import database
 from recallary.config import Settings
-from recallary.indexing.indexer import index_library
+from recallary.indexing.indexer import (
+    index_library,
+    pending_reason_for_snapshot,
+    scan_library,
+)
 from recallary.search.engine import search_library
 
 
@@ -102,6 +107,43 @@ def test_deleted_pdf_is_removed_from_index(tmp_path: Path) -> None:
     summary = index_library(settings, embedder_factory=FakeEmbedder)
 
     assert summary.removed == 1
+
+
+def test_pending_check_ignores_timestamp_only_sync_changes(tmp_path: Path) -> None:
+    settings = Settings(root=tmp_path)
+    settings.ensure_directories()
+    path = settings.library_dir / "paper.pdf"
+    _write_pdf(
+        path,
+        "Paper",
+        "An impedance controller was validated with metabolic cost. " * 12,
+    )
+    index_library(settings, embedder_factory=FakeEmbedder)
+    original_snapshot = scan_library(settings)[0]
+
+    with database.connect(settings.database_path) as connection:
+        row = database.fetch_paper_by_relative_path(connection, "library/paper.pdf")
+        assert row is not None
+
+        path_stat = path.stat()
+        os.utime(
+            path,
+            ns=(path_stat.st_atime_ns, original_snapshot.modified_ns + 1_000_000_000),
+        )
+        synced_snapshot = scan_library(settings)[0]
+
+        assert synced_snapshot.size == original_snapshot.size
+        assert synced_snapshot.modified_ns != original_snapshot.modified_ns
+        assert pending_reason_for_snapshot(
+            row,
+            synced_snapshot,
+            verify_hash=False,
+        ) == "changed"
+        assert pending_reason_for_snapshot(
+            row,
+            synced_snapshot,
+            verify_hash=True,
+        ) == ""
 
 
 def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:

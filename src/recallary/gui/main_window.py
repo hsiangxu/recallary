@@ -34,7 +34,7 @@ from recallary.bibtex import parse_bibtex
 from recallary.config import DEFAULT_LIMIT, Settings
 from recallary.domain import BibTeXInfo, SearchResult
 from recallary.indexing.embedder import model_is_installed
-from recallary.indexing.indexer import scan_library
+from recallary.indexing.indexer import pending_reason_for_snapshot, scan_library
 from recallary.gui.workers import IndexWorker, SearchWorker, SetupWorker
 
 
@@ -320,16 +320,11 @@ class MainWindow(QMainWindow):
         pending_count = 0
         for snapshot in snapshots:
             row = existing_by_path.get(snapshot.relative_path)
-            reason = ""
-            if row is None:
-                reason = "not indexed"
-            elif (
-                int(row["file_size"]) != snapshot.size
-                or int(row["modified_ns"]) != snapshot.modified_ns
-            ):
-                reason = "changed"
-            elif str(row["status"]) != "ready" or bool(row["error_message"]):
-                reason = str(row["status"])
+            reason = pending_reason_for_snapshot(
+                row,
+                snapshot,
+                verify_hash=True,
+            )
             if not reason:
                 continue
             pending_count += 1

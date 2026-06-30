@@ -50,6 +50,40 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def pending_reason_for_snapshot(
+    row: sqlite3.Row | None,
+    snapshot: FileSnapshot,
+    *,
+    verify_hash: bool = False,
+) -> str:
+    """Return why a scanned PDF needs indexing, or an empty string if it does not.
+
+    The cheap file snapshot check handles normal local use.  Hash verification is
+    only needed for cross-machine sync cases where OneDrive may preserve the PDF
+    bytes but expose a different modified timestamp on another OS.
+    """
+    if row is None:
+        return "not indexed"
+
+    if str(row["status"]) != "ready" or bool(row["error_message"]):
+        return str(row["status"]) or "needs attention"
+
+    if int(row["file_size"]) != snapshot.size:
+        return "changed"
+
+    if int(row["modified_ns"]) == snapshot.modified_ns:
+        return ""
+
+    if verify_hash:
+        try:
+            if str(row["content_hash"]) == sha256_file(snapshot.path):
+                return ""
+        except OSError:
+            return "changed"
+
+    return "changed"
+
+
 def _is_stable(snapshot: FileSnapshot) -> bool:
     stat = snapshot.path.stat()
     return stat.st_size == snapshot.size and stat.st_mtime_ns == snapshot.modified_ns
