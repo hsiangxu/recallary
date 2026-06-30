@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -61,6 +62,17 @@ def _parsed_title(row: Any) -> str:
         return title
     filename = str(row["filename"] or "").strip()
     return filename or Path(str(row["relative_path"])).name
+
+
+def _detail_label() -> QLabel:
+    label = QLabel("")
+    label.setWordWrap(True)
+    label.setMinimumWidth(0)
+    label.setSizePolicy(
+        QSizePolicy.Policy.Ignored,
+        QSizePolicy.Policy.Preferred,
+    )
+    return label
 
 
 def _unique_destination(directory: Path, filename: str) -> Path:
@@ -191,15 +203,11 @@ class MainWindow(QMainWindow):
         basic_tab = QWidget()
         basic_layout = QVBoxLayout(basic_tab)
         form = QFormLayout()
-        self.title_label = QLabel("")
-        self.title_label.setWordWrap(True)
-        self.filename_label = QLabel("")
-        self.filename_label.setWordWrap(True)
-        self.path_label = QLabel("")
-        self.path_label.setWordWrap(True)
-        self.status_label = QLabel("")
-        self.bib_summary_label = QLabel("")
-        self.bib_summary_label.setWordWrap(True)
+        self.title_label = _detail_label()
+        self.filename_label = _detail_label()
+        self.path_label = _detail_label()
+        self.status_label = _detail_label()
+        self.bib_summary_label = _detail_label()
         form.addRow("Display name", self.title_label)
         form.addRow("PDF file", self.filename_label)
         form.addRow("Path", self.path_label)
@@ -310,8 +318,17 @@ class MainWindow(QMainWindow):
         if message:
             self.statusBar().showMessage(message)
 
-    def refresh(self) -> None:
+    def _select_list_item(self, list_widget: QListWidget, relative_path: str) -> bool:
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            if str(item.data(Qt.ItemDataRole.UserRole)) == relative_path:
+                list_widget.setCurrentItem(item)
+                return True
+        return False
+
+    def refresh(self, *, select_relative_path: str | None = None) -> None:
         database.initialize(self.settings.database_path)
+        desired_selection = select_relative_path or self.current_relative_path
         self.paper_list.clear()
         self.pending_list.clear()
         self.tag_filter_list.clear()
@@ -356,6 +373,14 @@ class MainWindow(QMainWindow):
             f"{len(papers)} tracked records, {pdf_count} PDFs in library, "
             f"{pending_count} pending, model {model_status}."
         )
+        if desired_selection:
+            self._select_list_item(
+                self.paper_list,
+                desired_selection,
+            ) or self._select_list_item(
+                self.pending_list,
+                desired_selection,
+            )
 
     def run_setup(self) -> None:
         self._set_busy(True, "Running setup...")
@@ -555,7 +580,7 @@ class MainWindow(QMainWindow):
                     display_name,
                 )
             current = self.current_relative_path
-            self.refresh()
+            self.refresh(select_relative_path=current)
             self.show_paper(current)
             self.statusBar().showMessage("Display name saved.")
         except Exception as error:
@@ -582,7 +607,7 @@ class MainWindow(QMainWindow):
                     "",
                 )
             current = self.current_relative_path
-            self.refresh()
+            self.refresh(select_relative_path=current)
             self.show_paper(current)
             self.statusBar().showMessage("Display name reset to parsed title.")
         except Exception as error:
@@ -613,8 +638,9 @@ class MainWindow(QMainWindow):
                     database.remove_tag_from_paper(
                         connection, self.current_relative_path, tag
                     )
-            self.refresh()
-            self.show_paper(self.current_relative_path)
+            current = self.current_relative_path
+            self.refresh(select_relative_path=current)
+            self.show_paper(current)
             self.statusBar().showMessage("Tags saved.")
         except Exception as error:
             self.statusBar().showMessage("Could not save tags.")
@@ -686,7 +712,7 @@ class MainWindow(QMainWindow):
         relative_path = str(result["relative_path"])
         content = str(result["content"])
         semantic_enabled = bool(result["semantic_enabled"])
-        self.refresh()
+        self.refresh(select_relative_path=relative_path)
         self.show_paper(relative_path)
         if content and not semantic_enabled:
             self.statusBar().showMessage(
