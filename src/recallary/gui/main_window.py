@@ -35,7 +35,13 @@ from recallary.config import DEFAULT_LIMIT, Settings
 from recallary.domain import BibTeXInfo, SearchResult
 from recallary.indexing.embedder import model_is_installed
 from recallary.indexing.indexer import pending_reason_for_snapshot, scan_library
-from recallary.gui.workers import IndexWorker, SearchWorker, SetupWorker
+from recallary.gui.workers import (
+    AddPdfsWorker,
+    IndexWorker,
+    SaveNotesWorker,
+    SearchWorker,
+    SetupWorker,
+)
 
 
 def _display_title(row: Any) -> str:
@@ -49,10 +55,6 @@ def _display_title(row: Any) -> str:
 def _parsed_title(row: Any) -> str:
     title = str(row["title"] or "").strip()
     return title or str(row["relative_path"])
-
-
-def _relative_path(settings: Settings, path: Path) -> str:
-    return path.resolve().relative_to(settings.root).as_posix()
 
 
 def _unique_destination(directory: Path, filename: str) -> Path:
@@ -525,6 +527,7 @@ class MainWindow(QMainWindow):
                 self, "Display Name", "Select an indexed paper first."
             )
             return
+        self.statusBar().showMessage("Saving display name...")
         try:
             with database.connect(self.settings.database_path) as connection:
                 row = database.fetch_paper_by_relative_path(
@@ -545,6 +548,7 @@ class MainWindow(QMainWindow):
             self.show_paper(current)
             self.statusBar().showMessage("Display name saved.")
         except Exception as error:
+            self.statusBar().showMessage("Could not save display name.")
             QMessageBox.critical(self, "Could not save display name", str(error))
 
     def reset_display_name(self) -> None:
@@ -553,6 +557,7 @@ class MainWindow(QMainWindow):
                 self, "Display Name", "Select an indexed paper first."
             )
             return
+        self.statusBar().showMessage("Resetting display name...")
         try:
             with database.connect(self.settings.database_path) as connection:
                 row = database.fetch_paper_by_relative_path(
@@ -570,12 +575,14 @@ class MainWindow(QMainWindow):
             self.show_paper(current)
             self.statusBar().showMessage("Display name reset to parsed title.")
         except Exception as error:
+            self.statusBar().showMessage("Could not reset display name.")
             QMessageBox.critical(self, "Could not reset display name", str(error))
 
     def save_tags(self) -> None:
         if not self.current_relative_path:
             QMessageBox.warning(self, "Tags", "Select an indexed paper first.")
             return
+        self.statusBar().showMessage("Saving tags...")
         desired = {
             database.normalize_tag_name(tag)
             for tag in self.tags_edit.text().split(",")
@@ -599,6 +606,7 @@ class MainWindow(QMainWindow):
             self.show_paper(self.current_relative_path)
             self.statusBar().showMessage("Tags saved.")
         except Exception as error:
+            self.statusBar().showMessage("Could not save tags.")
             QMessageBox.critical(self, "Could not save tags", str(error))
 
     def save_bibtex(self) -> None:
@@ -609,8 +617,9 @@ class MainWindow(QMainWindow):
         if not raw:
             QMessageBox.warning(self, "BibTeX", "BibTeX text is empty.")
             return
-        parsed = parse_bibtex(raw)
+        self.statusBar().showMessage("Saving BibTeX...")
         try:
+            parsed = parse_bibtex(raw)
             with database.connect(self.settings.database_path) as connection:
                 database.save_bibtex_for_paper(
                     connection,
@@ -625,12 +634,14 @@ class MainWindow(QMainWindow):
             self.show_paper(self.current_relative_path)
             self.statusBar().showMessage("BibTeX saved.")
         except Exception as error:
+            self.statusBar().showMessage("Could not save BibTeX.")
             QMessageBox.critical(self, "Could not save BibTeX", str(error))
 
     def remove_bibtex(self) -> None:
         if not self.current_relative_path:
             QMessageBox.warning(self, "BibTeX", "Select an indexed paper first.")
             return
+        self.statusBar().showMessage("Removing BibTeX...")
         try:
             with database.connect(self.settings.database_path) as connection:
                 database.remove_bibtex_from_paper(
@@ -639,40 +650,39 @@ class MainWindow(QMainWindow):
             self.show_paper(self.current_relative_path)
             self.statusBar().showMessage("BibTeX removed.")
         except Exception as error:
+            self.statusBar().showMessage("Could not remove BibTeX.")
             QMessageBox.critical(self, "Could not remove BibTeX", str(error))
-
-    def _encode_note(self, content: str) -> Any:
-        if not content.strip():
-            return None
-        if not model_is_installed(self.settings.model_dir):
-            return None
-        from recallary.indexing.embedder import Embedder
-
-        return Embedder(self.settings).encode_passages([content])[0]
 
     def save_notes(self) -> None:
         if not self.current_relative_path:
             QMessageBox.warning(self, "Notes", "Select an indexed paper first.")
             return
         content = self.notes_edit.toPlainText().strip()
-        try:
-            embedding = self._encode_note(content)
-            with database.connect(self.settings.database_path) as connection:
-                database.save_note_for_paper(
-                    connection,
-                    self.current_relative_path,
-                    content,
-                    embedding=embedding,
-                )
-            self.show_paper(self.current_relative_path)
-            if content and embedding is None:
-                self.statusBar().showMessage(
-                    "Notes saved for keyword search. Run setup to enable semantic note search."
-                )
-            else:
-                self.statusBar().showMessage("Notes saved.")
-        except Exception as error:
-            QMessageBox.critical(self, "Could not save notes", str(error))
+        relative_path = self.current_relative_path
+        self._set_busy(True, "Saving notes...")
+        worker = SaveNotesWorker(self.settings, relative_path, content)
+        worker.finished.connect(self._notes_saved)
+        thread = self._start_worker(worker)
+        worker.finished.connect(thread.quit)
+
+    def _notes_saved(self, ok: bool, result: object, error: str) -> None:
+        self._set_busy(False)
+        if not ok:
+            QMessageBox.critical(self, "Could not save notes", error)
+            return
+
+        assert isinstance(result, dict)
+        relative_path = str(result["relative_path"])
+        content = str(result["content"])
+        semantic_enabled = bool(result["semantic_enabled"])
+        self.refresh()
+        self.show_paper(relative_path)
+        if content and not semantic_enabled:
+            self.statusBar().showMessage(
+                "Notes saved for keyword search. Run setup to enable semantic note search."
+            )
+        else:
+            self.statusBar().showMessage("Notes saved.")
 
     def add_pdfs(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -683,21 +693,27 @@ class MainWindow(QMainWindow):
         )
         if not files:
             return
-        added = 0
-        added_paths: list[str] = []
-        errors: list[str] = []
-        self.settings.library_dir.mkdir(parents=True, exist_ok=True)
-        for file_name in files:
-            source = Path(file_name)
-            try:
-                destination = _unique_destination(
-                    self.settings.library_dir, source.name
-                )
-                shutil.copy2(source, destination)
-                added += 1
-                added_paths.append(_relative_path(self.settings, destination))
-            except Exception as error:
-                errors.append(f"{source}: {error}")
+        self._set_busy(True, "Adding PDFs...")
+        worker = AddPdfsWorker(self.settings, files)
+        worker.progress.connect(
+            lambda current, total, name: self.statusBar().showMessage(
+                f"Adding PDF [{current}/{total}] {name}"
+            )
+        )
+        worker.finished.connect(self._pdfs_added)
+        thread = self._start_worker(worker)
+        worker.finished.connect(thread.quit)
+
+    def _pdfs_added(self, ok: bool, result: object, error: str) -> None:
+        self._set_busy(False)
+        if not ok:
+            QMessageBox.critical(self, "Could not add PDFs", error)
+            return
+
+        assert isinstance(result, dict)
+        added = int(result["added"])
+        added_paths = list(result["added_paths"])
+        errors = list(result["errors"])
         self.refresh()
         message = f"Added {added} PDF(s) to library."
         if added:
@@ -708,6 +724,12 @@ class MainWindow(QMainWindow):
         if errors:
             message += "\n\n" + "\n".join(errors[:10])
         QMessageBox.information(self, "Add PDFs", message)
+        if errors:
+            self.statusBar().showMessage(
+                f"Added {added} PDF(s) with {len(errors)} error(s)."
+            )
+        else:
+            self.statusBar().showMessage(f"Added {added} PDF(s) to library.")
 
     def _current_pdf_path(self) -> Path | None:
         if not self.current_relative_path:
@@ -719,14 +741,18 @@ class MainWindow(QMainWindow):
         if not path or not path.is_file():
             QMessageBox.warning(self, "Open PDF", "Select an existing PDF first.")
             return
+        self.statusBar().showMessage("Opening PDF...")
         QDesktopServices.openUrl(QUrl.fromLocalFile(os.fspath(path)))
+        self.statusBar().showMessage("Open PDF request sent.")
 
     def reveal_pdf(self) -> None:
         path = self._current_pdf_path()
         if not path or not path.is_file():
             QMessageBox.warning(self, "Reveal PDF", "Select an existing PDF first.")
             return
+        self.statusBar().showMessage("Revealing PDF in folder...")
         _open_in_file_manager(path)
+        self.statusBar().showMessage("Reveal in folder request sent.")
 
     def delete_paper(self) -> None:
         if not self.current_relative_path:
@@ -755,6 +781,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
+        self.statusBar().showMessage("Deleting paper...")
         try:
             paper_id: int | None = None
             with database.connect(self.settings.database_path) as connection:
@@ -790,4 +817,5 @@ class MainWindow(QMainWindow):
             self.refresh()
             self.statusBar().showMessage("Paper moved to data/trash/ and removed from index.")
         except Exception as error:
+            self.statusBar().showMessage("Could not delete paper.")
             QMessageBox.critical(self, "Could not delete paper", str(error))
