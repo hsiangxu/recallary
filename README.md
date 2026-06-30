@@ -6,7 +6,8 @@ ranked list of likely PDFs with file paths, PDF page numbers, and source
 excerpts.
 
 Recallary does not generate answers or summaries. Evidence shown in search
-results is extracted directly from your PDFs.
+results is extracted directly from your PDFs or clearly marked as your own
+notes.
 
 ## Current scope
 
@@ -19,6 +20,7 @@ results is extracted directly from your PDFs.
 - Runs the semantic model on CPU
 - Supports manual paper tags
 - Supports manually attached BibTeX entries
+- Supports searchable personal notes
 - Supports Windows and Apple Silicon macOS through separate local Conda
   environments
 - Does not perform OCR
@@ -27,16 +29,18 @@ results is extracted directly from your PDFs.
 
 ```text
 recallary/
-├─ library/       # Put PDFs here
-├─ data/          # Database, model, caches, logs, and runtime files
-├─ src/
-├─ tests/
-├─ environment.yml
-└─ pyproject.toml
+|- Recallary.vbs   # Optional Windows launcher, generated per computer
+|- Recallary.app/  # Optional macOS launcher, generated per computer
+|- library/        # Put PDFs here
+|- data/           # Database, model, caches, logs, and runtime files
+|- src/
+|- tests/
+|- environment.yml
+`- pyproject.toml
 ```
 
-`library/` and `data/` are ignored by Git. They can still be synchronized by
-OneDrive.
+`library/`, `data/`, and generated launcher files are ignored by Git. They can
+still be synchronized by OneDrive.
 
 Except for the Conda environment, files created or downloaded for Recallary
 are kept inside this repository. Recallary redirects Hugging Face,
@@ -63,9 +67,37 @@ environment directories through OneDrive.
 
 ## Start the GUI
 
+From an activated environment:
+
 ```bash
 recallary
 ```
+
+To create a double-click launcher for the current computer:
+
+```bash
+recallary make-launcher
+```
+
+This creates one launcher in the repository root:
+
+- Windows: `Recallary.vbs`
+- macOS: `Recallary.app`
+
+The launcher records the current Conda environment's Python path. Re-run
+`recallary make-launcher` if the Conda environment or repository path changes.
+
+Launcher logs are written inside the repository:
+
+- Windows: `data/logs/launcher-windows.log`
+- macOS: `data/logs/launcher-macos.log`
+
+The launcher prevents multiple Recallary GUI instances from starting at the
+same time. If Recallary is already running or fails to start, it writes to the
+launcher log and tries to show a system message box. The launcher also waits
+for the GUI to report that its window is ready; if that does not happen within
+the startup timeout, it terminates the failed GUI process instead of leaving it
+running in the background.
 
 The GUI lets you:
 
@@ -102,7 +134,7 @@ network access. Setup does not index PDFs.
 
 ## Normal use
 
-1. Open Recallary with `recallary`.
+1. Open Recallary with `recallary` or a generated launcher.
 2. Add PDFs with `Add PDFs`, or manually copy PDFs under `library/`.
 3. Confirm newly added PDFs appear under `Pending PDFs`.
 4. Click `Index Library`.
@@ -133,7 +165,6 @@ not from the PDF. To delete notes, clear the Notes text box and click
 `Delete Paper` does not permanently erase the PDF immediately. It moves the
 file from `library/` into `data/trash/` and removes the paper's index, tags,
 BibTeX entry, and notes from the database.
-
 
 ## CLI fallback
 
@@ -180,8 +211,9 @@ Ordinary indexing is incremental:
 - deleted PDF: remove its index
 - failed PDF: report the error and continue
 
-Rebuild reindexes every PDF. Manual tags and BibTeX entries are preserved by
-matching them back to PDFs through their repository-relative paths.
+Rebuild reindexes every PDF. Manual display names, tags, BibTeX entries, and
+notes are preserved by matching them back to PDFs through their
+repository-relative paths.
 
 ## OneDrive use
 
@@ -208,8 +240,8 @@ and macOS can share the same index.
 ## Remove
 
 Delete this repository to remove Recallary's PDFs, database, downloaded model,
-caches, logs, and runtime files. Remove the external Conda environment
-separately:
+caches, logs, runtime files, and generated launchers. Remove the external
+Conda environment separately:
 
 ```bash
 conda env remove -n recallary

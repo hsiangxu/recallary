@@ -82,6 +82,14 @@ class Settings:
     def index_lock_path(self) -> Path:
         return self.runtime_dir / "index.lock"
 
+    @property
+    def app_lock_path(self) -> Path:
+        return self.runtime_dir / "app.lock"
+
+    @property
+    def gui_ready_path(self) -> Path:
+        return self.runtime_dir / "gui.ready"
+
     def ensure_directories(self) -> None:
         for directory in (
             self.library_dir,

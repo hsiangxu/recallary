@@ -11,6 +11,7 @@ from recallary.bibtex import parse_bibtex
 from recallary.config import DEFAULT_LIMIT, MODEL_ID, Settings
 from recallary.indexing.embedder import download_model, model_is_installed
 from recallary.indexing.indexer import index_library, scan_library
+from recallary.launchers import make_launcher
 from recallary.search.engine import search_library
 
 
@@ -216,6 +217,21 @@ def status() -> None:
                 f"  {row['relative_path']} [{row['status']}]: "
                 f"{row['error_message']}"
             )
+
+
+@app.command("make-launcher")
+def make_launcher_command() -> None:
+    """Create a double-click launcher in the repository root for this computer."""
+    settings = _settings()
+    try:
+        result = make_launcher(settings)
+    except Exception as error:
+        _fail(str(error))
+    typer.secho("Launcher created.", fg=typer.colors.GREEN)
+    typer.echo(f"Launcher: {result.path}")
+    typer.echo(f"Python: {result.python_path}")
+    typer.echo(f"Log: {result.log_path}")
+    typer.echo("Re-run this command if the Conda environment or repo path changes.")
 
 
 @tag_app.command("add")

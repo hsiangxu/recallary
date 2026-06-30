@@ -1,6 +1,8 @@
 # Recallary's local PDF library and generated data
 /library/
 /data/
+/Recallary.vbs
+/Recallary.app/
 
 # Local configuration and secrets
 .env
