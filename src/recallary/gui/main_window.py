@@ -549,6 +549,8 @@ class MainWindow(QMainWindow):
             for evidence in result.evidence:
                 if evidence.source_type == "pdf":
                     lines.append(f"PDF page {evidence.page_number}")
+                elif evidence.source_type == "metadata":
+                    lines.append("Paper metadata")
                 else:
                     lines.append("Note evidence")
                 lines.append(evidence.text)

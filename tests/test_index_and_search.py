@@ -52,6 +52,34 @@ class FakeEmbedder:
         return _vector(query)
 
 
+def _normalize(vector: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vector)
+    return vector if norm == 0 else vector / norm
+
+
+def _sawicki_vector(text: str) -> np.ndarray:
+    lowered = text.lower()
+    if (
+        "sawicki" in lowered
+        or "electromyography" in lowered
+        or "emgbased" in lowered
+        or "sawicky" in lowered
+    ):
+        return np.array([1.0, 0.0], dtype=np.float32)
+    return np.array([0.0, 1.0], dtype=np.float32)
+
+
+class SawickiFakeEmbedder:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def encode_passages(self, texts: list[str]) -> np.ndarray:
+        return np.vstack([_normalize(_sawicki_vector(text)) for text in texts])
+
+    def encode_query(self, query: str) -> np.ndarray:
+        return _normalize(_sawicki_vector(query))
+
+
 def test_incremental_index_and_hybrid_search(tmp_path: Path) -> None:
     settings = Settings(root=tmp_path)
     settings.ensure_directories()
@@ -107,6 +135,43 @@ def test_deleted_pdf_is_removed_from_index(tmp_path: Path) -> None:
     summary = index_library(settings, embedder_factory=FakeEmbedder)
 
     assert summary.removed == 1
+
+
+def test_pdf_semantic_match_is_not_buried_by_note_matches(tmp_path: Path) -> None:
+    settings = Settings(root=tmp_path)
+    settings.ensure_directories()
+    _write_pdf(
+        settings.library_dir / "target.pdf",
+        "A neuromechanics-based powered ankle exoskeleton",
+        (
+            "Gregory S Sawicki developed a powered ankle exoskeleton that "
+            "supplies plantarflexion assistance proportional to soleus "
+            "electromyography EMG amplitude for post-stroke walking. "
+        )
+        * 8,
+    )
+    _write_pdf(
+        settings.library_dir / "distractor.pdf",
+        "Another ankle exoskeleton paper",
+        "This paper is about a generic ankle exoskeleton controller. " * 12,
+    )
+    index_library(settings, embedder_factory=SawickiFakeEmbedder)
+    with database.connect(settings.database_path) as connection:
+        database.save_note_for_paper(
+            connection,
+            "library/distractor.pdf",
+            "greg sawicky EMGbased ankle exoskeleton proportional",
+            embedding=np.array([0.0, 1.0], dtype=np.float32),
+        )
+
+    results = search_library(
+        settings,
+        "greg sawicky EMGbased ankle exoskeleton proportional",
+        embedder=SawickiFakeEmbedder(settings),
+    )
+
+    assert results[0].relative_path == "library/target.pdf"
+    assert results[0].evidence[0].source_type == "pdf"
 
 
 def test_pending_check_ignores_timestamp_only_sync_changes(tmp_path: Path) -> None:
@@ -206,6 +271,18 @@ def test_tags_and_bibtex_survive_rebuild(tmp_path: Path) -> None:
     assert filtered[0].tags == ("controller-design",)
     assert filtered[0].bibtex
     assert filtered[0].bibtex.citekey == "smith2024ankle"
+
+    bibtex_results = search_library(
+        settings,
+        "smith2024ankle",
+        embedder=FakeEmbedder(settings),
+    )
+    assert bibtex_results[0].relative_path == "library/ankle.pdf"
+    assert any(
+        evidence.source_type == "metadata"
+        and "smith2024ankle" in evidence.text
+        for evidence in bibtex_results[0].evidence
+    )
 
     note_results = search_library(
         settings,

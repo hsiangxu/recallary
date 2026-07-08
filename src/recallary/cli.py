@@ -155,11 +155,12 @@ def search(
             )
             typer.echo(f"   BibTeX: {citation}")
         for evidence in result.evidence:
-            label = (
-                f"PDF page {evidence.page_number}"
-                if evidence.source_type == "pdf"
-                else "Note evidence"
-            )
+            if evidence.source_type == "pdf":
+                label = f"PDF page {evidence.page_number}"
+            elif evidence.source_type == "metadata":
+                label = "Paper metadata"
+            else:
+                label = "Note evidence"
             typer.secho(f"   {label}", fg=typer.colors.CYAN)
             typer.echo(f'   "{evidence.text}"')
         typer.echo()

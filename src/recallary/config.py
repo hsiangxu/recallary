@@ -7,7 +7,7 @@ from pathlib import Path
 
 MODEL_ID = "intfloat/multilingual-e5-small"
 INDEX_VERSION = 1
-DEFAULT_LIMIT = 10
+DEFAULT_LIMIT = 20
 DEFAULT_BATCH_SIZE = 8
 
 

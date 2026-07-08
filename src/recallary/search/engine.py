@@ -8,13 +8,17 @@ from dataclasses import dataclass
 import numpy as np
 
 from recallary import database
-from recallary.config import Settings
+from recallary.config import DEFAULT_LIMIT, Settings
 from recallary.domain import BibTeXInfo, SearchEvidence, SearchResult
 from recallary.indexing.embedder import Embedder
 
 
 RRF_K = 60
 RETRIEVAL_LIMIT = 100
+NOTE_SCORE_WEIGHT = 0.35
+METADATA_SCORE_WEIGHT = 1.35
+SEMANTIC_FIRST_RANK_BOOST = 0.026
+SEMANTIC_MULTI_HIT_BOOST = 0.004
 
 
 @dataclass(frozen=True)
@@ -30,16 +34,73 @@ class _EvidenceHit:
 
 
 def _query_tokens(query: str) -> list[str]:
-    tokens = re.findall(r"[^\W_][\w.+#/-]*", query.lower(), flags=re.UNICODE)
+    lowered = query.lower()
+    raw_tokens = re.findall(r"[^\W_][\w.+#/-]*", lowered, flags=re.UNICODE)
+    tokens: list[str] = []
+    for raw_token in raw_tokens:
+        pieces = [piece for piece in re.split(r"[-_/]+", raw_token) if piece]
+        for piece in (raw_token, *pieces):
+            if len(piece) > 1:
+                tokens.append(piece)
+            if piece.startswith("emg") and piece != "emg":
+                tokens.extend(("emg", piece[3:]))
+            if piece == "emg":
+                tokens.append("electromyography")
     return list(dict.fromkeys(token for token in tokens if len(token) > 1))
+
+
+def _safe_fts_token(token: str) -> str:
+    return re.sub(r"[^\w]", "", token, flags=re.UNICODE)
 
 
 def _fts_query(query: str) -> str:
     tokens = _query_tokens(query)
     if not tokens:
         return ""
-    quoted = ['"' + token.replace('"', '""') + '"' for token in tokens[:30]]
-    return " OR ".join(quoted)
+    terms: list[str] = []
+    for token in tokens[:30]:
+        safe = _safe_fts_token(token)
+        if not safe:
+            continue
+        terms.append(f'"{safe}"')
+        if len(safe) >= 4:
+            terms.append(f"{safe}*")
+    return " OR ".join(dict.fromkeys(terms))
+
+
+def _metadata_text(row: sqlite3.Row) -> str:
+    fields = [
+        str(row["display_name"] or ""),
+        str(row["title"] or ""),
+        str(row["authors"] or ""),
+        str(row["filename"] or ""),
+        str(row["relative_path"] or ""),
+        str(row["bibtex_citekey"] or ""),
+        str(row["bibtex_title"] or ""),
+        str(row["bibtex_authors"] or ""),
+        str(row["bibtex_year"] or ""),
+    ]
+    return " ".join(field for field in fields if field).strip()
+
+
+def _metadata_score(text: str, query_tokens: list[str]) -> float:
+    if not query_tokens:
+        return 0.0
+    text_tokens = set(_query_tokens(text))
+    lowered = text.lower()
+    score = 0.0
+    for token in query_tokens:
+        if token in text_tokens:
+            score += 3.0
+        elif len(token) >= 4 and any(
+            candidate.startswith(token) or token.startswith(candidate)
+            for candidate in text_tokens
+            if len(candidate) >= 4
+        ):
+            score += 1.6
+        elif len(token) >= 4 and token in lowered:
+            score += 1.0
+    return score / max(len(query_tokens), 1)
 
 
 def _tag_filter_sql(tag_names: tuple[str, ...], paper_alias: str = "p") -> tuple[str, tuple[object, ...]]:
@@ -109,6 +170,58 @@ def _lexical_hits(
             relative_path=str(row["relative_path"]),
         )
         for row in rows
+    ]
+
+
+def _metadata_hits(
+    connection: sqlite3.Connection,
+    query: str,
+    tag_names: tuple[str, ...] = (),
+) -> list[_EvidenceHit]:
+    query_tokens = _query_tokens(query)
+    if not query_tokens:
+        return []
+    tag_sql, tag_params = _tag_filter_sql(tag_names)
+    rows = connection.execute(
+        f"""
+        SELECT
+            p.id AS paper_id,
+            p.display_name,
+            p.title,
+            p.authors,
+            p.filename,
+            p.relative_path,
+            b.citekey AS bibtex_citekey,
+            b.title AS bibtex_title,
+            b.authors AS bibtex_authors,
+            b.year AS bibtex_year
+        FROM papers p
+        LEFT JOIN bibtex_entries b ON b.paper_id = p.id
+        WHERE p.status = 'ready'
+        {tag_sql}
+        """,
+        tag_params,
+    ).fetchall()
+
+    scored: list[tuple[float, sqlite3.Row, str]] = []
+    for row in rows:
+        text = _metadata_text(row)
+        score = _metadata_score(text, query_tokens)
+        if score > 0:
+            scored.append((score, row, text))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        _EvidenceHit(
+            source_type="metadata",
+            source_id=int(row["paper_id"]),
+            paper_id=int(row["paper_id"]),
+            page_number=None,
+            text=text,
+            title=str(row["display_name"] or row["title"] or row["filename"]),
+            authors=str(row["authors"] or row["bibtex_authors"] or ""),
+            relative_path=str(row["relative_path"]),
+        )
+        for _, row, text in scored[:RETRIEVAL_LIMIT]
     ]
 
 
@@ -319,7 +432,7 @@ def search_library(
     settings: Settings,
     query: str,
     *,
-    limit: int = 10,
+    limit: int = DEFAULT_LIMIT,
     tag_names: tuple[str, ...] = (),
     embedder: Embedder | None = None,
 ) -> list[SearchResult]:
@@ -341,11 +454,13 @@ def search_library(
     with database.connect(settings.database_path) as connection:
         lexical = _lexical_hits(connection, cleaned_query, tag_names)
         semantic = _semantic_hits(connection, query_vector, tag_names)
+        metadata = _metadata_hits(connection, cleaned_query, tag_names)
         note_lexical = _note_lexical_hits(connection, cleaned_query, tag_names)
         note_semantic = _note_semantic_hits(connection, query_vector, tag_names)
         result_paper_ids = sorted(
             {hit.paper_id for hit in lexical}
             | {hit.paper_id for hit in semantic}
+            | {hit.paper_id for hit in metadata}
             | {hit.paper_id for hit in note_lexical}
             | {hit.paper_id for hit in note_semantic}
         )
@@ -355,12 +470,21 @@ def search_library(
     hit_scores: defaultdict[tuple[str, int], float] = defaultdict(float)
     hit_data: dict[tuple[str, int], _EvidenceHit] = {}
     source_count: defaultdict[tuple[str, int], int] = defaultdict(int)
-    for hits in (lexical, semantic, note_lexical, note_semantic):
+    semantic_pdf_ranks: defaultdict[int, list[int]] = defaultdict(list)
+    for source_name, hits in (
+        ("lexical", lexical),
+        ("semantic", semantic),
+        ("metadata", metadata),
+        ("note_lexical", note_lexical),
+        ("note_semantic", note_semantic),
+    ):
         seen: set[tuple[str, int]] = set()
         for rank, hit in enumerate(hits, start=1):
             key = (hit.source_type, hit.source_id)
             hit_scores[key] += 1.0 / (RRF_K + rank)
             hit_data[key] = hit
+            if source_name == "semantic" and hit.source_type == "pdf":
+                semantic_pdf_ranks[hit.paper_id].append(rank)
             if key not in seen:
                 source_count[key] += 1
                 seen.add(key)
@@ -371,7 +495,9 @@ def search_library(
             score *= 1.08
         hit = hit_data[key]
         if hit.source_type == "note":
-            score *= 0.95
+            score *= NOTE_SCORE_WEIGHT
+        if hit.source_type == "metadata":
+            score *= METADATA_SCORE_WEIGHT
         paper_hits[hit.paper_id].append((score, hit))
 
     ranked_papers: list[tuple[float, int, list[tuple[float, _EvidenceHit]]]] = []
@@ -385,15 +511,29 @@ def search_library(
             else set()
         )
         used_note = hits[0][1].source_type == "note"
+        used_metadata = hits[0][1].source_type == "metadata"
+        pdf_extra_count = 0
         for hit_score, hit in hits[1:]:
             if hit.source_type == "pdf" and hit.page_number not in used_pages:
-                score += hit_score * 0.45
+                score += hit_score * (0.45 if pdf_extra_count == 0 else 0.25)
                 used_pages.add(hit.page_number)
-                break
+                pdf_extra_count += 1
+                if pdf_extra_count >= 3:
+                    break
             if hit.source_type == "note" and not used_note:
-                score += hit_score * 0.35
+                score += hit_score * 0.20
                 used_note = True
-                break
+            if hit.source_type == "metadata" and not used_metadata:
+                score += hit_score * 0.30
+                used_metadata = True
+        semantic_ranks = semantic_pdf_ranks.get(paper_id, [])
+        if semantic_ranks:
+            best_semantic_rank = min(semantic_ranks)
+            score += SEMANTIC_FIRST_RANK_BOOST / (
+                1.0 + 0.08 * (best_semantic_rank - 1)
+            )
+            top_semantic_hits = sum(1 for rank in semantic_ranks if rank <= 10)
+            score += min(max(top_semantic_hits - 1, 0), 4) * SEMANTIC_MULTI_HIT_BOOST
         title_tokens = set(_query_tokens(hits[0][1].title))
         if query_token_set:
             score += (
@@ -407,10 +547,13 @@ def search_library(
         selected: list[SearchEvidence] = []
         used_pages: set[int] = set()
         used_note = False
+        used_metadata = False
         for hit_score, hit in hits:
             if hit.source_type == "pdf" and hit.page_number in used_pages:
                 continue
             if hit.source_type == "note" and used_note:
+                continue
+            if hit.source_type == "metadata" and used_metadata:
                 continue
             selected.append(
                 SearchEvidence(
@@ -424,6 +567,8 @@ def search_library(
                 used_pages.add(hit.page_number)
             if hit.source_type == "note":
                 used_note = True
+            if hit.source_type == "metadata":
+                used_metadata = True
             if len(selected) == 3:
                 break
         representative = hits[0][1]
